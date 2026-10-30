@@ -247,11 +247,10 @@ class Downloads:
         if not isinstance(params, dict):
             raise ValueError('镜头参数必须是对象')
         defaults=dict(task='t2va', prompt='', resolution='480p', duration=5, aspect='16:9',
-                      seed=None, cpu_offload=None, first_image='', last_image='', references=[])
+                      seed=None, cpu_offload=False, first_image='', last_image='', references=[])
         defaults.update({k:v for k,v in params.items() if k in defaults})
-        if defaults['cpu_offload'] is None:
-            # 480p 任意时长、768p 5 秒都不需要卸载；768p 更长的档位才默认开启。
-            defaults['cpu_offload'] = defaults['resolution'] == '768p' and defaults['duration'] > 5
+        # 固定不做 CPU 卸载：速度优先，长视频靠降分辨率而不是卸载。
+        defaults['cpu_offload'] = False
         if not isinstance(defaults['prompt'], str) or len(defaults['prompt'])>8000:
             raise ValueError('提示词长度不正确')
         return defaults

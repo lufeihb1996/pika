@@ -151,18 +151,6 @@ function renderPresets() {
 }
 renderPresets();
 
-// 官方实测：480p 任意时长、768p 5 秒都能在不卸载的默认模式下跑完（H100 采样约 66–69 GiB）；
-// 768p 15 秒在 H100 默认模式就会 OOM，必须加 --cpu-offload。A100 80GB 沿用同一档位。
-function recommendedOffload(resolution, duration) {
-  return resolution === '768p' && Number(duration) > 5;
-}
-
-function offloadNote() {
-  $('render-note').textContent = $('offload').checked
-    ? '已开启 CPU 卸载：显存占用降低，但每次前向都要搬权重，速度明显变慢。'
-    : '已关闭 CPU 卸载：权重常驻显存，速度更快；显存不足时再开启。';
-}
-
 function syncSettings(auto) {
   const currentTask = $('task').value;
   document.querySelectorAll('[data-aspect]').forEach(b => b.classList.toggle('selected', b.dataset.aspect === $('aspect').value));
@@ -170,8 +158,6 @@ function syncSettings(auto) {
   const info = modeMeta[currentTask] || modeMeta.t2va;
   if ($('inspectorModeTitle')) $('inspectorModeTitle').textContent = info.title;
   if ($('modeTip')) $('modeTip').innerHTML = info.tip;
-  if (auto) $('offload').checked = recommendedOffload($('resolution').value, $('duration').value);
-  offloadNote();
 }
 
 document.querySelectorAll('[data-aspect]').forEach(b => b.addEventListener('click', () => {
@@ -214,7 +200,6 @@ function promptCount() {
 $('prompt').addEventListener('input', promptCount);
 for (const k of ['resolution', 'duration', 'aspect', 'seed']) $(k).addEventListener('change', draft);
 $('duration').addEventListener('change', () => syncSettings(true));
-$('offload').addEventListener('change', offloadNote);
 promptCount();
 
 function resetComposer() {
@@ -224,7 +209,6 @@ function resetComposer() {
   $('duration').value = '5';
   $('aspect').value = '16:9';
   $('seed').value = '';
-  $('offload').checked = recommendedOffload('480p', 5);
   renderInputs();
   syncSettings();
   promptCount();
@@ -240,7 +224,7 @@ if ($('seed42Btn')) $('seed42Btn').onclick = () => { $('seed').value = '42'; dra
 function inspectorParams(){
   return {task:$('task').value,prompt:$('prompt').value,resolution:$('resolution').value,
     duration:Number($('duration').value),aspect:$('aspect').value,seed:$('seed').value===''?null:Number($('seed').value),
-    cpu_offload:$('offload').checked,first_image:state.uploads.first_image||'',last_image:state.uploads.last_image||'',
+    cpu_offload:false,first_image:state.uploads.first_image||'',last_image:state.uploads.last_image||'',
     references:$('task').value==='ref2va'?state.refs.map(({id,kind})=>({id,kind})):[]};
 }
 function loadInspector(job){
@@ -249,7 +233,6 @@ function loadInspector(job){
   state.inspectorJob=job.id;
   $('task').value=p.task||'t2va';renderInputs();
   for(const k of ['prompt','resolution','duration','aspect','seed'])$(k).value=p[k]??(k==='seed'?'':({resolution:'480p',duration:5,aspect:'16:9',prompt:''}[k]));
-  $('offload').checked=p.cpu_offload!==false;
   state.uploads={first_image:p.first_image||'',last_image:p.last_image||''};
   state.refs=(p.references||[]).map((r,i)=>({...r,name:`已上传参考素材 ${i+1}`}));renderRefs();
   for(const key of ['first_image','last_image'])if(state.uploads[key]&&$('drop-'+key))$('drop-'+key).querySelector('b').textContent='已关联素材（点击可替换）';
@@ -426,7 +409,7 @@ $('composer').addEventListener('submit', async event => {
     duration: Number($('duration').value),
     aspect: $('aspect').value,
     seed: $('seed').value === '' ? null : Number($('seed').value),
-    cpu_offload: $('offload').checked,
+    cpu_offload: false,
     first_image: state.uploads.first_image || '',
     last_image: state.uploads.last_image || '',
     references: task === 'ref2va' ? state.refs.map(({ id, kind }) => ({ id, kind })) : []

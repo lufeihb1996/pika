@@ -122,6 +122,8 @@ class DownloadTests(unittest.TestCase):
         self.assertFalse(any(j['id']==remote['id'] for j in self.manager.state()['jobs']))
         active=self.manager.create_shot({'prompt':'busy'})
         self.manager.jobs[active['id']]['status']='running'
+        # 远端也报同一个任务在跑，否则 monitor 会把它标成“Colab 重启导致中断”。
+        self.jobs=[dict(id=active['id'],version=1,status='running')]
         with self.assertRaises(ValueError):self.manager.delete_shot(active['id'])
         with self.assertRaises(ValueError):self.manager.edit_shot(active['id'],{})
 

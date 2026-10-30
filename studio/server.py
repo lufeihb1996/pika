@@ -90,12 +90,8 @@ class Studio:
             seed = secrets.randbelow(2**32)
         if type(seed) is not int or not 0 <= seed <= 2**53 - 1:
             raise ValueError("种子须为 0 至 9007199254740991 的整数；留空随机")
-        offload = data.get("cpu_offload")
-        if offload is None:
-            # 与前端一致：480p 任意时长、768p 5 秒无需卸载；768p 更长档位默认开启。
-            offload = res == "768p" and duration > 5
-        if type(offload) is not bool:
-            raise ValueError("CPU 卸载参数无效")
+        # 不做 CPU 卸载：transformer 常驻显存，速度优先。768p 长视频若显存不足就降回 480p。
+        offload = False
         first, last = data.get("first_image", ""), data.get("last_image", "")
         if (bool(first), bool(last)) != TASKS[task]:
             raise ValueError("请按所选模式上传首尾帧")
@@ -158,8 +154,6 @@ class Studio:
         cmd = [str(self.cli.parent / "python"), str(Path(__file__).with_name("progress_runner.py")), "--task", p["task"], "--model-repo", "Pika-Labs/Pika-H3-Flex",
                "--revision", MODEL_REV, "--prompt-file", str(prompt), "--resolution", p["resolution"],
                "--duration", str(p["duration"]), "--aspect", p["aspect"], "--seed", str(p["seed"]), "--output", str(output)]
-        if p["cpu_offload"]:
-            cmd.append("--cpu-offload")
         for key, flag in (("first_image", "--first-image"), ("last_image", "--last-image")):
             if p[key]:
                 cmd.extend([flag, str(self.upload_path(p[key], "image"))])
