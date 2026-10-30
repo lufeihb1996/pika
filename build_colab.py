@@ -31,11 +31,10 @@ def build_version():
 version = build_version()
 stamp = f'APP_VERSION = "{version}"'
 
-files = {"installer_runtime.py": (root / "installer_runtime.py").read_text(encoding="utf-8"),
-         "jobstore.py": (root / "jobstore.py").read_text(encoding="utf-8")}
-for file in sorted((root / "studio").rglob("*")):
-    if file.is_file() and file.suffix in {".py", ".html", ".css", ".js", ".json"}:
-        files[file.relative_to(root / "studio").as_posix()] = file.read_text(encoding="utf-8")
+files = {"installer_runtime.py": (root / "installer_runtime.py").read_text(encoding="utf-8")}
+# Colab 只当执行器：只带后端 .py，前端和本地数据库不再进包。
+for file in sorted((root / "studio").rglob("*.py")):
+    files[file.relative_to(root / "studio").as_posix()] = file.read_text(encoding="utf-8")
 files["server.py"] = files["server.py"].replace(BASE_VERSION, stamp)
 
 bundle = base64.b64encode(gzip.compress(json.dumps(files, ensure_ascii=False).encode(), mtime=0)).decode()

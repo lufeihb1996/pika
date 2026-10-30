@@ -2,6 +2,16 @@
 
 手机与电脑可用的官方 Pika H3 Flex 视频工作台，参考 MOSS Mobile Studio 的任务流程，直接控制官方 CLI。网页可单独部署到 Vercel，任务服务与 GPU 运行在 Colab；网页的 /api 与 /media 经 Vercel 反向代理到固定 Cloudflare 隧道。
 
+## 谁存什么
+
+| 位置 | 角色 | 存什么 |
+|---|---|---|
+| 电脑 | 唯一状态源 | `outputs/studio.db`：shots / takes / shot_assets |
+| 电脑 | 文件和界面 | `outputs/<shot_id>/v<N>.mp4`，3091 上的网页 |
+| Colab | 无状态执行器 | 内存队列 + `outputs/<shot_id>-v<N>.mp4`，重启即清空 |
+
+镜头、版本号、下载状态都只在本地。Colab 重启丢的是队列，跟 ComfyUI 重启一样；已生成的 MP4 仍在磁盘，本地会继续下载。
+
 ## 从 GitHub 启动（推荐）
 
 仓库：<https://github.com/lufeihb1996/pika>

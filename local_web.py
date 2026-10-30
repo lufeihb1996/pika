@@ -82,16 +82,30 @@ class Handler(SimpleHTTPRequestHandler):
             self.rfile.read(size)
             self.downloads.schedule(match[1],retry=True)
             return self.json({'ok':True})
+        if path == '/api/jobs':
+            # 提交在本地完成：分配版本号、写库，再把任务推给 Colab。
+            try:
+                size=int(self.headers.get('Content-Length','0'))
+                if not 0<size<=200000:
+                    return self.json({'error':'请求大小无效'},400)
+                return self.json(self.downloads.submit(json.loads(self.rfile.read(size))),201)
+            except (ValueError,TypeError) as exc:
+                return self.json({'error':str(exc)},400)
+            except Exception as exc:
+                return self.json({'error':'无法连接 Colab：'+str(exc)},502)
         if path.startswith('/api/'):
             return self.proxy()
         self.send_error(404)
 
     def local_video(self,jid,download):
         manager=self.downloads
-        path=manager.root/(jid+'.mp4')
+        job=manager.jobs.get(jid,{}) or {}
+        version=int(job.get('version') or 1)
+        # 迁移过来的老视频不在 <id>/v<N>.mp4 里，优先用它记录的绝对路径。
+        path=Path(job['video_path']) if job.get('video_path') else manager.root/jid/f'v{version}.mp4'
         with manager.lock:
-            ready=manager.jobs.get(jid,{}).get('download',{}).get('status')=='ready'
-        if not ready or not path.is_file():
+            ready=job.get('download',{}).get('status')=='ready'
+        if not path.is_file():
             manager.schedule(jid)
             return self.json({'error':'视频正在下载到电脑，请完成后再播放'},425)
         size=path.stat().st_size

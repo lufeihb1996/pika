@@ -59,31 +59,35 @@ class DownloadTests(unittest.TestCase):
 
     def test_background_download_without_browser_and_no_duplicates(self):
         jid='1'*32
-        self.jobs=[dict(id=jid,status='done',created=1,params={})]
         self.manager=Downloads(self.url,self.root,interval=.1,retry_delays=(0,))
+        self.manager.jobs[jid]=dict(id=jid,version=1,status='done',created=1,params={},
+                                    download={'status':'pending'})
+        self.manager.schedule(jid)
         self.wait(jid,'ready')
-        self.assertEqual((self.root/(jid+'.mp4')).stat().st_size,10000)
-        self.manager.upsert(self.jobs[0]);self.manager.schedule(jid)
+        self.assertEqual((self.root/jid/'v1.mp4').stat().st_size,10000)
+        # 远端重复报同一条状态时，不应再下第二遍。
+        self.manager.merge_remote([dict(id=jid,version=1,status='done')])
         time.sleep(.15)
         self.assertEqual(len(self.requests),1)
         self.manager.close();self.manager=None
-        # Already downloaded works are loaded without needing the original Colab session.
-        self.jobs=[]
+        # 重启后本地仍然记得已经下载过。
         self.manager=Downloads(self.url,self.root,interval=.1,retry_delays=(0,))
         self.assertEqual(self.manager.jobs[jid]['download']['status'],'ready')
 
     def test_truncated_download_is_not_promoted_and_can_resume(self):
         jid='2'*32
         self.truncate=True
-        self.jobs=[dict(id=jid,status='done',created=1,params={})]
         self.manager=Downloads(self.url,self.root,interval=.1,retry_delays=(0,))
+        self.manager.jobs[jid]=dict(id=jid,version=1,status='done',created=1,params={},
+                                    download={'status':'pending'})
+        self.manager.schedule(jid)
         self.wait(jid,'failed')
-        self.assertFalse((self.root/(jid+'.mp4')).exists())
-        self.assertEqual((self.root/(jid+'.part')).stat().st_size,1000)
+        self.assertFalse((self.root/jid/'v1.mp4').exists())
+        self.assertEqual((self.root/jid/'v1.part').stat().st_size,1000)
         self.manager.schedule(jid,retry=True)
         self.wait(jid,'ready')
         self.assertEqual(self.requests,[None,'bytes=1000-'])
-        self.assertEqual((self.root/(jid+'.mp4')).read_bytes(),b'0123456789'*1000)
+        self.assertEqual((self.root/jid/'v1.mp4').read_bytes(),b'0123456789'*1000)
 
     def test_local_media_missing_returns_immediately(self):
         import local_web,urllib.request,urllib.error
@@ -112,14 +116,12 @@ class DownloadTests(unittest.TestCase):
         self.assertEqual(self.manager.jobs[draft['id']]['params']['prompt'],'a saved shot')
         self.manager.delete_shot(draft['id'])
         self.assertFalse(any(j['id']==draft['id'] for j in self.manager.state()['jobs']))
-        # A remote refresh must not resurrect a removed row.
-        remote=dict(id='4'*32,status='cancelled',created=1,params={'prompt':'old'})
-        self.manager.upsert(remote)
-        self.manager.delete_shot(remote['id'])
-        self.manager.upsert(remote)
+        # 远端出现本地没记录的任务时，不能凭空创建镜头。
+        remote=dict(id='4'*32,version=1,status='cancelled')
+        self.manager.merge_remote([remote])
         self.assertFalse(any(j['id']==remote['id'] for j in self.manager.state()['jobs']))
-        active=dict(id='5'*32,status='running',created=2,params={})
-        self.manager.upsert(active)
+        active=self.manager.create_shot({'prompt':'busy'})
+        self.manager.jobs[active['id']]['status']='running'
         with self.assertRaises(ValueError):self.manager.delete_shot(active['id'])
         with self.assertRaises(ValueError):self.manager.edit_shot(active['id'],{})
 

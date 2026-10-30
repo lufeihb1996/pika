@@ -17,8 +17,6 @@ from http import cookies
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
-from jobstore import JobStore
-
 MODEL_REV = "0ddf55ad7067ca1e76812253bd7b4600df87f759"
 APP_VERSION = "1.3.0"
 TASKS = {"t2va": (False, False), "i2va": (True, False), "l2va": (False, True),
@@ -44,20 +42,12 @@ class Studio:
         self.active = None
         self.proc = None
         self.failures = {}
-        self.store = JobStore(self.root / "studio.db", migrate_dir=self.root / "jobs")
-        for job in self.store.all():
-            try:
-                if job["status"] in {"running", "queued", "cancelling"}:
-                    job.update(status="interrupted", stage="服务重启，任务未自动重跑", finished=time.time())
-                self.jobs[job["id"]] = job
-                self.save(job)
-            except (KeyError, ValueError, TypeError):
-                continue
+        # 无状态执行器：任务只活在内存里。重启后队列清空，已生成的 MP4 仍在 outputs/。
         self.thread = threading.Thread(target=self.worker, daemon=True)
         self.thread.start()
 
-    def save(self, job, new_take=False):
-        self.store.put(job, new_take=new_take)
+    def save(self, job):
+        """无状态实现：这里不落盘，保留调用点是为了 worker 的代码不用到处改。"""
 
     def session(self):
         expiry = str(int(time.time()) + 7 * 86400)
@@ -136,40 +126,33 @@ class Studio:
         params = self.validate(data)
         # 从已有镜头提交：沿用同一个 shot，生成新 take；新建镜头才生成新 id。
         shot_id = data.get("shot_id")
-        existing = None
-        if isinstance(shot_id, str) and ID.fullmatch(shot_id):
+        version = data.get("version")
+        if not isinstance(shot_id, str) or not ID.fullmatch(shot_id):
+            shot_id = secrets.token_hex(16)
+        if type(version) is not int or version < 1:
+            version = 1
+        with self.lock:
             existing = self.jobs.get(shot_id)
             if existing and existing["status"] in {"queued", "running", "cancelling"}:
                 raise ValueError("这个镜头正在生成，请先取消再提交")
-        created = time.time()
-        if existing:
-            created = existing.get("created") or created
-        else:
-            draft_created = data.get("draft_created")
-            if isinstance(draft_created, (int, float)) and 0 < draft_created <= created:
-                created = float(draft_created)
-        with self.lock:
             if sum(j["status"] in {"queued", "running", "cancelling"} for j in self.jobs.values()) >= 8:
                 raise ValueError("队列已满，请等待或取消任务")
-            job = dict(id=existing["id"] if existing else secrets.token_hex(16),
-                       created=created, status="queued", stage="等待 GPU", params=params)
-            self.jobs[job["id"]] = job
-            self.save(job, new_take=True)
+            job = dict(id=shot_id, version=version, created=time.time(),
+                       status="queued", stage="等待 GPU", params=params)
+            self.jobs[shot_id] = job
         self.wake.set()
         return job
 
     def output_path(self, job):
-        """每个 take 一个文件；旧版本没有 take 后缀时回退到 <id>.mp4。"""
-        path = self.root / "outputs" / f"{job['id']}-t{int(job.get('take') or 1)}.mp4"
-        if not path.is_file():
-            legacy = self.root / "outputs" / (job["id"] + ".mp4")
-            if legacy.is_file():
-                return legacy
-        return path
+        """每个版本一个文件：outputs/<shot_id>-v<version>.mp4。"""
+        return self.root / "outputs" / f"{job['id']}-v{int(job.get('version') or 1)}.mp4"
+
+    def log_path(self, job):
+        return self.root / "jobs" / f"{job['id']}-v{int(job.get('version') or 1)}.log"
 
     def command(self, job):
         p = job["params"]
-        prompt = self.root / "jobs" / (job["id"] + ".txt")
+        prompt = self.root / "jobs" / f"{job['id']}-v{int(job.get('version') or 1)}.txt"
         prompt.write_text(p["prompt"], encoding="utf-8")
         output = self.output_path(job)
         cmd = [str(self.cli.parent / "python"), str(Path(__file__).with_name("progress_runner.py")), "--task", p["task"], "--model-repo", "Pika-Labs/Pika-H3-Flex",
@@ -220,7 +203,6 @@ class Studio:
         self.wake.set()
         if self.thread is not threading.current_thread():
             self.thread.join(timeout=3)
-        self.store.close()
 
     def worker(self):
         while not self.stopped.is_set():
@@ -234,7 +216,7 @@ class Studio:
                 self.active = job["id"]
                 job.update(status="running", started=time.time(), stage="准备官方组件 / 下载权重")
                 self.save(job)
-            log = self.root / "jobs" / (job["id"] + ".log")
+            log = self.log_path(job)
             try:
                 cmd = self.command(job)
                 env = os.environ.copy()
@@ -302,7 +284,12 @@ class Studio:
                 self.wake.set()
 
     def tail(self, job_id):
-        path = self.root / "jobs" / (job_id + ".log")
+        job = self.jobs.get(job_id)
+        if job:
+            path = self.log_path(job)
+        else:
+            files = sorted((self.root / "jobs").glob(f"{job_id}-v*.log"))
+            path = files[-1] if files else self.root / "jobs" / (job_id + ".log")
         if not path.is_file():
             return "等待任务启动…"
         with path.open("rb") as f:
@@ -424,13 +411,16 @@ class Handler(BaseHTTPRequestHandler):
             return self.upload(query)
         match = re.fullmatch(r"/media/([0-9a-f]{32})", path)
         if match and not post:
-            job = self.app.jobs[match[1]]
-            if job["status"] != "done":
+            job = self.app.jobs.get(match[1])
+            if job and job["status"] == "done":
+                return self.file(self.app.output_path(job), "video/mp4", "download" in query)
+            # 服务重启后内存里没有任务，但文件还在磁盘上，按版本号取最新的。
+            files = sorted((self.app.root / "outputs").glob(match[1] + "-v*.mp4"))
+            legacy = self.app.root / "outputs" / (match[1] + ".mp4")
+            target = files[-1] if files else (legacy if legacy.is_file() else None)
+            if not target:
                 raise ValueError("视频尚未完成")
-            return self.file(self.app.output_path(job), "video/mp4", "download" in query)
-        if not post and path in {"/", "/app.js", "/style.css", "/manifest.json"}:
-            name = "index.html" if path == "/" else path[1:]
-            return self.file(Path(__file__).parent / "public" / name)
+            return self.file(target, "video/mp4", "download" in query)
         self.json({"error": "接口不存在"}, 404)
 
     def upload(self, query):
@@ -461,7 +451,6 @@ class Handler(BaseHTTPRequestHandler):
             part.replace(target)
         finally:
             part.unlink(missing_ok=True)
-        self.app.store.add_upload(upload_id, kind, name, size, time.time())
         return self.json({"id": upload_id, "kind": kind, "name": name, "size": size}, 201)
 
     def file(self, path, content_type=None, download=False):

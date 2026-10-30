@@ -1,12 +1,9 @@
-"""Video project data as real tables: shots / takes / shot_assets / uploads / downloads.
+"""本地视频库：shots / takes / shot_assets。
 
-- shots    一个镜头：提示词、模式、分辨率、时长、画幅、种子、显存策略、状态
-- takes    这个镜头的每一次生成：状态、起止时间、进度、耗时、产出的 MP4
-- shot_assets  首帧 / 尾帧 / 参考素材，按 role + position 存
-- uploads  上传过的素材文件元数据
-- downloads 下载到本机的结果（本地专用，Colab 不写）
-
-读取时组装回原来的 job dict，接口和前端不用改。
+只有电脑这边存状态。Colab 是无状态执行器，跑完只留 MP4，不建库。
+- shots       镜头：提示词、模式、分辨率、时长、画幅、种子、显存策略
+- takes      这个镜头的第 N 次生成：状态、进度、视频路径、下载结果
+- shot_assets 首帧 / 尾帧 / 参考素材
 """
 from __future__ import annotations
 import json
@@ -47,7 +44,7 @@ CREATE INDEX IF NOT EXISTS shots_status ON shots(status);
 
 CREATE TABLE IF NOT EXISTS takes (
     shot_id           TEXT NOT NULL,
-    take_no           INTEGER NOT NULL,
+    version           INTEGER NOT NULL,
     created           REAL NOT NULL DEFAULT 0,
     status            TEXT NOT NULL DEFAULT '',
     stage             TEXT NOT NULL DEFAULT '',
@@ -66,9 +63,13 @@ CREATE TABLE IF NOT EXISTS takes (
     progress_total    INTEGER,
     sampling_seconds  REAL,
     sampling_eta_seconds REAL,
-    video_file        TEXT,
+    video_path        TEXT,
     video_bytes       INTEGER,
-    PRIMARY KEY (shot_id, take_no)
+    download_status   TEXT,
+    download_error    TEXT,
+    downloaded_bytes  INTEGER,
+    total_bytes       INTEGER,
+    PRIMARY KEY (shot_id, version)
 );
 
 CREATE TABLE IF NOT EXISTS shot_assets (
@@ -79,28 +80,9 @@ CREATE TABLE IF NOT EXISTS shot_assets (
     upload_id TEXT NOT NULL,
     PRIMARY KEY (shot_id, role, position)
 );
-
-CREATE TABLE IF NOT EXISTS uploads (
-    id      TEXT PRIMARY KEY,
-    kind    TEXT,
-    name    TEXT,
-    size    INTEGER,
-    created REAL
-);
-
-CREATE TABLE IF NOT EXISTS downloads (
-    shot_id          TEXT PRIMARY KEY,
-    status           TEXT,
-    total_bytes      INTEGER,
-    downloaded_bytes INTEGER,
-    bytes_per_second REAL,
-    error            TEXT,
-    finished         REAL,
-    attempt          INTEGER
-);
 """
 
-LEGACY_TABLES = ("jobs", "job_references", "job_progress", "job_downloads")
+LEGACY_TABLES = ("jobs", "job_references", "job_progress", "job_downloads", "downloads", "uploads")
 
 
 class JobStore:
@@ -114,7 +96,6 @@ class JobStore:
         self.db.execute("PRAGMA synchronous=NORMAL")
         self._drop_legacy_tables()
         self.db.executescript(SCHEMA)
-        self._ensure_columns()
         self.db.commit()
         if migrate_dir:
             self.migrate(migrate_dir)
@@ -122,33 +103,31 @@ class JobStore:
     def _drop_legacy_tables(self):
         existing = {row[0] for row in self.db.execute(
             "SELECT name FROM sqlite_master WHERE type='table'")}
-        if existing & set(LEGACY_TABLES):
-            for table in LEGACY_TABLES:
+        legacy = set(existing) & set(LEGACY_TABLES)
+        # 旧版 takes 用 (shot_id, take_no) 做主键，主键不可改，整表重建后从 .json.migrated 重导。
+        if "takes" in existing:
+            columns = {row[1] for row in self.db.execute("PRAGMA table_info(takes)")}
+            if "take_no" in columns:
+                legacy.update({"shots", "takes", "shot_assets"})
+        if legacy:
+            for table in legacy:
                 self.db.execute(f"DROP TABLE IF EXISTS {table}")
             self.db.commit()
 
-    def _ensure_columns(self):
-        """老库里已有的表不会因为 CREATE TABLE IF NOT EXISTS 补列，这里补上。"""
-        wanted = {
-            "takes": {"prompt": "TEXT", "resolution": "TEXT", "duration": "INTEGER",
-                      "aspect": "TEXT", "seed": "INTEGER", "cpu_offload": "INTEGER"},
-        }
-        for table, columns in wanted.items():
-            existing = {row[1] for row in self.db.execute(f"PRAGMA table_info({table})")}
-            if not existing:
-                continue
-            for name, kind in columns.items():
-                if name not in existing:
-                    self.db.execute(f"ALTER TABLE {table} ADD COLUMN {name} {kind}")
-
     # ---------- 写入 ----------
 
-    def put(self, job, new_take=False):
+    def next_version(self, shot_id):
+        row = self.db.execute("SELECT MAX(version) FROM takes WHERE shot_id=?",
+                              (str(shot_id),)).fetchone()
+        return (row[0] or 0) + 1
+
+    def put(self, job):
         job_id = str(job["id"])
         params = job.get("params") or {}
         editor = job.get("editor_params") or {}
         progress = job.get("progress") or {}
         download = job.get("download") or {}
+        version = job.get("version")
         with self.lock, self.db:
             self.db.execute(
                 "INSERT INTO shots (id, created, status, stage, task, prompt, resolution, duration,"
@@ -181,14 +160,16 @@ class JobStore:
                  editor.get("duration"), editor.get("aspect"), editor.get("seed"),
                  (1 if editor.get("cpu_offload") else 0) if editor else None,
                  editor.get("first_image"), editor.get("last_image")))
-            take_no = self._next_take(job_id, job.get("take"), new_take)
+            if version is None:
+                version = self.next_version(job_id)
             self.db.execute(
-                "INSERT INTO takes (shot_id, take_no, created, status, stage, started, finished,"
+                "INSERT INTO takes (shot_id, version, created, status, stage, started, finished,"
                 " error, prompt, resolution, duration, aspect, seed, cpu_offload,"
                 " progress_phase, progress_message, progress_completed, progress_total,"
-                " sampling_seconds, sampling_eta_seconds, video_file, video_bytes)"
-                " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)"
-                " ON CONFLICT(shot_id, take_no) DO UPDATE SET status=excluded.status,"
+                " sampling_seconds, sampling_eta_seconds, video_path, video_bytes,"
+                " download_status, download_error, downloaded_bytes, total_bytes)"
+                " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)"
+                " ON CONFLICT(shot_id, version) DO UPDATE SET status=excluded.status,"
                 " stage=excluded.stage, started=excluded.started, finished=excluded.finished,"
                 " error=excluded.error, prompt=excluded.prompt, resolution=excluded.resolution,"
                 " duration=excluded.duration, aspect=excluded.aspect, seed=excluded.seed,"
@@ -199,8 +180,11 @@ class JobStore:
                 " progress_total=excluded.progress_total,"
                 " sampling_seconds=excluded.sampling_seconds,"
                 " sampling_eta_seconds=excluded.sampling_eta_seconds,"
-                " video_file=excluded.video_file, video_bytes=excluded.video_bytes",
-                (job_id, take_no, float(job.get("created") or 0), str(job.get("status") or ""),
+                " video_path=excluded.video_path, video_bytes=excluded.video_bytes,"
+                " download_status=excluded.download_status,"
+                " download_error=excluded.download_error,"
+                " downloaded_bytes=excluded.downloaded_bytes, total_bytes=excluded.total_bytes",
+                (job_id, version, float(job.get("created") or 0), str(job.get("status") or ""),
                  str(job.get("stage") or ""), job.get("started"), job.get("finished"),
                  job.get("error") or progress.get("error"),
                  params.get("prompt"), params.get("resolution"), params.get("duration"),
@@ -209,29 +193,11 @@ class JobStore:
                  progress.get("phase"), progress.get("message"),
                  progress.get("completed"), progress.get("total"),
                  progress.get("sampling_seconds"), progress.get("sampling_eta_seconds"),
-                 job.get("video_file"), job.get("video_bytes")))
+                 job.get("video_path"), job.get("video_bytes"),
+                 download.get("status"), download.get("error"),
+                 download.get("downloaded_bytes"), download.get("total_bytes")))
             self._put_assets(job_id, editor, params)
-            if download:
-                self.db.execute(
-                    "INSERT INTO downloads (shot_id, status, total_bytes, downloaded_bytes,"
-                    " bytes_per_second, error, finished, attempt) VALUES (?,?,?,?,?,?,?,?)"
-                    " ON CONFLICT(shot_id) DO UPDATE SET status=excluded.status,"
-                    " total_bytes=excluded.total_bytes, downloaded_bytes=excluded.downloaded_bytes,"
-                    " bytes_per_second=excluded.bytes_per_second, error=excluded.error,"
-                    " finished=excluded.finished, attempt=excluded.attempt",
-                    (job_id, download.get("status"), download.get("total_bytes"),
-                     download.get("downloaded_bytes"), download.get("bytes_per_second"),
-                     download.get("error"), download.get("finished"), download.get("attempt")))
-        job["take"] = take_no
-
-    def _next_take(self, job_id, take, new_take):
-        row = self.db.execute("SELECT MAX(take_no) FROM takes WHERE shot_id=?", (job_id,)).fetchone()
-        current = row[0] or 0
-        if new_take or not current:
-            return current + 1
-        if isinstance(take, int) and 0 < take <= current:
-            return take
-        return current
+        job["version"] = version
 
     def _put_assets(self, job_id, editor, params):
         self.db.execute("DELETE FROM shot_assets WHERE shot_id=?", (job_id,))
@@ -253,15 +219,9 @@ class JobStore:
     def delete(self, job_id):
         job_id = str(job_id)
         with self.lock, self.db:
-            for table in ("takes", "shot_assets", "downloads"):
-                self.db.execute(f"DELETE FROM {table} WHERE shot_id=?", (job_id,))
+            self.db.execute("DELETE FROM takes WHERE shot_id=?", (job_id,))
+            self.db.execute("DELETE FROM shot_assets WHERE shot_id=?", (job_id,))
             self.db.execute("DELETE FROM shots WHERE id=?", (job_id,))
-
-    def add_upload(self, upload_id, kind, name="", size=0, created=None):
-        with self.lock, self.db:
-            self.db.execute(
-                "INSERT OR REPLACE INTO uploads (id, kind, name, size, created) VALUES (?,?,?,?,?)",
-                (str(upload_id), kind, name, int(size or 0), created))
 
     # ---------- 读取 ----------
 
@@ -270,10 +230,8 @@ class JobStore:
             shots = self.db.execute("SELECT * FROM shots ORDER BY created DESC").fetchall()
             takes = self._latest_takes()
             assets = self._assets()
-            downloads = {r["shot_id"]: dict(r) for r in
-                         self.db.execute("SELECT * FROM downloads").fetchall()}
-        return [self._assemble(shot, takes.get(shot["id"]), assets.get(shot["id"]),
-                               downloads.get(shot["id"])) for shot in shots]
+        return [self._assemble(shot, takes.get(shot["id"]), assets.get(shot["id"]))
+                for shot in shots]
 
     def get(self, job_id):
         job_id = str(job_id)
@@ -283,14 +241,17 @@ class JobStore:
                 return None
             take = self._latest_takes(job_id).get(job_id)
             assets = self._assets(job_id).get(job_id)
-            download = self.db.execute("SELECT * FROM downloads WHERE shot_id=?",
-                                       (job_id,)).fetchone()
-        return self._assemble(shot, take, assets, dict(download) if download else None)
+        return self._assemble(shot, take, assets)
+
+    def takes(self, job_id):
+        with self.lock:
+            rows = self.db.execute("SELECT * FROM takes WHERE shot_id=? ORDER BY version",
+                                   (str(job_id),)).fetchall()
+        return [dict(row) for row in rows]
 
     def _latest_takes(self, job_id=None):
-        sql = ("SELECT t.* FROM takes t JOIN (SELECT shot_id, MAX(take_no) AS take_no"
-               " FROM takes GROUP BY shot_id) m"
-               " ON m.shot_id = t.shot_id AND m.take_no = t.take_no")
+        sql = ("SELECT t.* FROM takes t JOIN (SELECT shot_id, MAX(version) AS version FROM takes"
+               " GROUP BY shot_id) m ON m.shot_id = t.shot_id AND m.version = t.version")
         args = ()
         if job_id:
             sql += " WHERE t.shot_id=?"
@@ -311,7 +272,7 @@ class JobStore:
         return grouped
 
     @staticmethod
-    def _assemble(shot, take, assets, download):
+    def _assemble(shot, take, assets):
         assets = assets or {}
         job = {
             "id": shot["id"],
@@ -330,7 +291,7 @@ class JobStore:
             },
         }
         if take:
-            job["take"] = take["take_no"]
+            job["version"] = take["version"]
             if take["started"] is not None:
                 job["started"] = take["started"]
             if take["finished"] is not None:
@@ -345,17 +306,22 @@ class JobStore:
                         if take[v] is not None}
             if progress:
                 job["progress"] = progress
-            if take["video_file"]:
-                job["video_file"] = take["video_file"]
+            if take["video_path"]:
+                job["video_path"] = take["video_path"]
             if take["video_bytes"]:
                 job["video_bytes"] = take["video_bytes"]
+            download = {}
+            if take["download_status"]:
+                download["status"] = take["download_status"]
+            for key in ("download_error", "downloaded_bytes", "total_bytes"):
+                if take[key] is not None:
+                    download[key.split("_", 1)[1] if key == "download_error" else key] = take[key]
+            if download:
+                job["download"] = download
         if shot["local_draft"]:
             job["local_draft"] = True
         if shot["error"]:
             job["error"] = shot["error"]
-        if download:
-            job["download"] = {k: v for k, v in download.items()
-                               if k != "shot_id" and v is not None}
         if shot["editor_task"] is not None:
             job["editor_params"] = {
                 "task": shot["editor_task"], "prompt": shot["editor_prompt"],
@@ -371,7 +337,7 @@ class JobStore:
     # ---------- 迁移 ----------
 
     def migrate(self, folder):
-        """首启时把旧的 <id>.json / <id>.json.migrated 导成 shot + take。"""
+        """首启时把旧的 <id>.json 导成 shot + take。"""
         folder = Path(folder)
         with self.lock:
             empty = self.db.execute("SELECT COUNT(*) FROM shots").fetchone()[0] == 0
@@ -384,7 +350,14 @@ class JobStore:
                 continue
             if not isinstance(job, dict) or not job.get("id"):
                 continue
-            self.put(job, new_take=True)
+            job.setdefault("version", 1)
+            legacy_video = folder / (str(job["id"]) + ".mp4")
+            if legacy_video.is_file() and not job.get("video_path"):
+                job["video_path"] = str(legacy_video)
+                job.setdefault("download", {})["status"] = "ready"
+                job["download"]["total_bytes"] = legacy_video.stat().st_size
+                job["download"]["downloaded_bytes"] = legacy_video.stat().st_size
+            self.put(job)
             if not path.name.endswith(".migrated"):
                 try:
                     path.rename(path.with_suffix(".json.migrated"))

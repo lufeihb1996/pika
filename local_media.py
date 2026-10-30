@@ -76,7 +76,7 @@ class Downloads:
             if JOB_ID.fullmatch(str(job.get('id', ''))):
                 self.jobs[job['id']] = job
         for job in self.jobs.values():
-            target = self.root / (job['id'] + '.mp4')
+            target = self.root / job['id'] / f"v{int(job.get('version') or 1)}.mp4"
             if target.is_file() and target.stat().st_size > 0:
                 known = job.get('download', {}).get('total_bytes')
                 if known and known != target.stat().st_size:
@@ -84,6 +84,7 @@ class Downloads:
                 else:
                     size = target.stat().st_size
                     job['download'] = dict(status='ready', downloaded_bytes=size, total_bytes=size, bytes_per_second=0)
+                    job['video_path'] = str(target)
             elif job.get('download', {}).get('status') in {'ready', 'downloading'}:
                 job['download'] = dict(status='queued')
         self.threads = [threading.Thread(target=self.worker, daemon=True) for _ in range(2)]
@@ -107,22 +108,104 @@ class Downloads:
     def save(self, job):
         self.store.put(job)
 
-    def upsert(self, job):
-        jid = str(job.get('id', ''))
-        if not JOB_ID.fullmatch(jid):
-            return
+    def submit(self, data):
+        """本地分配版本号、写库，再把任务推给 Colab。Colab 不存任何东西。"""
+        if not isinstance(data, dict):
+            raise ValueError('请求体必须是对象')
+        params = self.shot_params(data)
+        if not params['prompt'].strip():
+            raise ValueError('请先填写提示词')
+        shot_id = data.get('shot_id')
         with self.lock:
-            previous = self.jobs.get(jid, {})
-            # 远端带了新的 take 号才说明是重新生成；没带就沿用本地下载结果。
-            if job.get('take') is not None and job.get('take') != previous.get('take'):
-                download = {'status': 'pending'}
+            if not (isinstance(shot_id, str) and JOB_ID.fullmatch(shot_id)):
+                shot_id = secrets.token_hex(16)
+                job = dict(id=shot_id, created=time.time(), status='queued', stage='等待 GPU',
+                           params=params, version=1, download={'status': 'pending'})
+                self.jobs[shot_id] = job
             else:
-                download = previous.get('download', {'status': 'pending'})
-            self.jobs[jid] = {**job, 'download': download,
-                              'hidden': previous.get('hidden', False),
-                              'editor_params': previous.get('editor_params')}
-            self.save(self.jobs[jid])
-        self.schedule(jid)
+                job = self.jobs.get(shot_id)
+                if not job:
+                    raise ValueError('镜头不存在')
+                if job.get('status') in {'queued', 'running', 'cancelling'}:
+                    raise ValueError('这个镜头正在生成，请先取消再提交')
+                # 草稿提交沿用它占用的版本号，其它镜头顺延到下一版。
+                if job.get('local_draft') and job.get('status') == 'draft':
+                    version = job.get('version') or 1
+                else:
+                    version = self.store.next_version(shot_id)
+                job.update(status='queued', stage='等待 GPU', params=params, version=version,
+                           download={'status': 'pending'})
+                for key in ('started', 'finished', 'error', 'video_path', 'video_bytes'):
+                    job.pop(key, None)
+            self.save(job)
+            version = job['version']
+        payload = dict(params, shot_id=shot_id, version=version)
+        try:
+            reply = self._post('/api/jobs', payload)
+        except Exception as exc:
+            with self.lock:
+                failed = self.jobs[shot_id]
+                failed.update(status='failed', stage=str(exc), error=str(exc))
+                self.save(failed)
+            raise
+        with self.lock:
+            job = self.jobs[shot_id]
+            job['status'] = reply.get('status') or 'queued'
+            job['stage'] = reply.get('stage') or job.get('stage')
+            self.save(job)
+            return json.loads(json.dumps(job))
+
+    def _post(self, path, payload):
+        body = json.dumps(payload, ensure_ascii=False).encode('utf-8')
+        conn = self.connection(timeout=30)
+        try:
+            conn.request('POST', path, body=body, headers={
+                'User-Agent': self.user_agent, 'Content-Type': 'application/json',
+                'Accept-Encoding': 'identity'})
+            response = conn.getresponse()
+            raw = response.read(2 * 1024**2)
+            if response.status not in {200, 201}:
+                try:
+                    message = json.loads(raw.decode('utf-8')).get('error', '')
+                except (ValueError, UnicodeDecodeError):
+                    message = ''
+                raise ValueError(message or f'Colab 返回 HTTP {response.status}')
+            return json.loads(raw.decode('utf-8'))
+        finally:
+            self.close_connection(conn)
+
+    def merge_remote(self, remote_jobs):
+        """远端只报内存里的任务状态；这里合并进本地 shots/takes。"""
+        seen = set()
+        for remote in remote_jobs:
+            jid = str(remote.get('id', ''))
+            if not JOB_ID.fullmatch(jid):
+                continue
+            seen.add(jid)
+            with self.lock:
+                job = self.jobs.get(jid)
+                if not job or job.get('version') != remote.get('version'):
+                    continue
+                job['status'] = remote.get('status') or job.get('status')
+                job['stage'] = remote.get('stage') or job.get('stage')
+                for key in ('started', 'finished'):
+                    if remote.get(key) is not None:
+                        job[key] = remote[key]
+                if remote.get('error'):
+                    job['error'] = remote['error']
+                if remote.get('progress'):
+                    job['progress'] = remote['progress']
+                self.save(job)
+            self.schedule(jid)
+        # 本地还在跑、远端已经没有：Colab 重启或服务丢了内存队列。
+        with self.lock:
+            stale = [j for j in self.jobs.values()
+                     if j.get('status') in {'queued', 'running', 'cancelling'}
+                     and j.get('id') not in seen]
+            for job in stale:
+                job.update(status='interrupted', stage='Colab 服务重启，任务未完成')
+                self.save(job)
+        return len(stale)
 
     def schedule(self, jid, retry=False):
         with self.lock:
@@ -153,7 +236,8 @@ class Downloads:
         params = self.shot_params(params)
         with self.lock:
             job = dict(id=secrets.token_hex(16), status='draft', stage='草稿 · 尚未提交生成',
-                       created=time.time(), params=params, download={'status': 'pending'}, local_draft=True)
+                       created=time.time(), params=params, version=1,
+                       download={'status': 'pending'}, local_draft=True)
             self.jobs[job['id']] = job
             self.save(job)
             return json.loads(json.dumps(job))
@@ -196,6 +280,7 @@ class Downloads:
 
     def refresh(self):
         conn = self.connection()
+        remote_jobs = []
         try:
             conn.request('GET', '/api/jobs', headers={'User-Agent': self.user_agent, 'Accept-Encoding': 'identity'})
             response = conn.getresponse()
@@ -204,12 +289,13 @@ class Downloads:
             data = json.loads(response.read(8 * 1024**2).decode('utf-8'))
             if not isinstance(data.get('jobs'), list):
                 raise ValueError('隧道返回的不是 Pika 任务列表')
-            for job in data['jobs']:
-                self.upsert(job)
+            remote_jobs = data['jobs']
             with self.lock:
                 self.online, self.last_error, self.last_checked = True, '', time.time()
         finally:
             self.close_connection(conn)
+        # 远端是无状态的，只报内存里的任务；本地负责落库和判断中断。
+        self.merge_remote(remote_jobs)
 
     def monitor(self):
         while not self.stop.is_set():
@@ -249,8 +335,12 @@ class Downloads:
                 self.pending.task_done()
 
     def download(self, jid):
-        target = self.root / (jid + '.mp4')
-        part = target.with_suffix('.part')
+        job = self.jobs.get(jid) or {}
+        version = int(job.get('version') or 1)
+        folder = self.root / jid
+        folder.mkdir(parents=True, exist_ok=True)
+        target = folder / f'v{version}.mp4'
+        part = folder / f'v{version}.part'
         offset = part.stat().st_size if part.exists() else 0
         self.update(jid, status='downloading', downloaded_bytes=offset, bytes_per_second=0, error='')
         self.busy.set()
@@ -259,7 +349,7 @@ class Downloads:
             headers = {'User-Agent': self.user_agent, 'Accept-Encoding': 'identity'}
             if offset:
                 headers['Range'] = f'bytes={offset}-'
-            conn.request('GET', '/media/' + jid, headers=headers)
+            conn.request('GET', f'/media/{jid}?v={version}', headers=headers)
             response = conn.getresponse()
             if response.status == 416:
                 part.unlink(missing_ok=True)
@@ -299,6 +389,8 @@ class Downloads:
             if received != length or part.stat().st_size != total:
                 raise RuntimeError(f'下载未完整：{part.stat().st_size}/{total} 字节，已保留断点')
             part.replace(target)
+            with self.lock:
+                self.jobs[jid]['video_path'] = str(target)
             self.update(jid, status='ready', downloaded_bytes=total, total_bytes=total,
                         bytes_per_second=0, error='', finished=time.time())
         finally:

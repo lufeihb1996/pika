@@ -38,7 +38,7 @@ class StudioTests(unittest.TestCase):
         self.client = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(jar))
         self.fake = self.root / "fake_cli.py"
         self.fake.write_text("import pathlib,sys,time\nprint('test subprocess started',flush=True)\ntime.sleep(float(sys.argv[2]))\npathlib.Path(sys.argv[1]).write_bytes(b'test-media-bytes')\n", encoding="utf-8")
-        self.app.command = lambda j: [sys.executable, str(self.fake), str(self.root / "outputs" / (j["id"] + ".mp4")), "0.15"]
+        self.app.command = lambda j: [sys.executable, str(self.fake), str(self.app.output_path(j)), "0.15"]
 
     def tearDown(self):
         for job in list(self.app.jobs.values()):
@@ -68,7 +68,7 @@ class StudioTests(unittest.TestCase):
         self.assertIn(self.app.jobs[job["id"]]["status"], target)
 
     def test_auth_and_traversal(self):
-        self.assertEqual(self.request("/").status, 200)
+        # 无状态执行器不再提供静态页面，只暴露 /api 与 /media。
         with self.assertRaises(urllib.error.HTTPError) as exc:
             self.request("/api/jobs")
         self.assertEqual(exc.exception.code, 401)
@@ -88,8 +88,7 @@ class StudioTests(unittest.TestCase):
         self.assertEqual(response.read(), b"st-m")
         self.assertEqual(self.app.jobs[job["id"]]["params"]["prompt"], prompt)
         self.assertIn("test subprocess started", json.load(self.request(f"/api/jobs/{job['id']}/log"))["log"])
-        restored = next(j for j in self.app.store.all() if j["id"] == job["id"])
-        self.assertEqual(restored["status"], "done")
+        self.assertTrue(self.app.output_path(job).is_file())
 
     def test_upload_and_invalid_inputs(self):
         self.login()
@@ -102,7 +101,7 @@ class StudioTests(unittest.TestCase):
                 self.app.validate({"prompt":"test", **invalid})
 
     def test_cancel_running_and_queued(self):
-        self.app.command = lambda j: [sys.executable, str(self.fake), str(self.root / "outputs" / (j["id"] + ".mp4")), "30"]
+        self.app.command = lambda j: [sys.executable, str(self.fake), str(self.app.output_path(j)), "30"]
         first = self.app.submit({"prompt":"first"})
         self.wait(first, {"running"})
         second = self.app.submit({"prompt":"second"})
@@ -111,13 +110,18 @@ class StudioTests(unittest.TestCase):
         self.app.cancel(first["id"])
         self.wait(first, {"cancelled"})
 
-    def test_incomplete_jobs_marked_interrupted(self):
+    def test_restart_clears_queue_but_keeps_video_files(self):
         job_id = "a"*32
-        (self.root / "jobs" / (job_id+".json")).write_text(json.dumps({"id":job_id,"status":"running","params":{},"created":0}))
+        output = self.root / "outputs" / f"{job_id}-v1.mp4"
+        output.write_bytes(b"render")
         with patch.dict(os.environ, {"PIKA_STUDIO_PASSWORD":"test"}):
-            app = Studio(self.root,self.cli)
-        self.assertEqual(app.jobs[job_id]["status"], "interrupted")
-        app.close()
+            app = Studio(self.root, self.cli)
+        try:
+            # 无状态：重启后内存队列清空，但已生成的文件还在，仍能通过 /media 取。
+            self.assertEqual(app.jobs, {})
+            self.assertTrue(app.output_path({"id": job_id, "version": 1}).is_file())
+        finally:
+            app.close()
 
     def test_local_frontend_proxy_login_upload_and_video_range(self):
         import importlib.util
@@ -144,7 +148,7 @@ class StudioTests(unittest.TestCase):
             response=self.request('/media/'+job['id'],headers={'Range':'bytes=2-5'})
             self.assertEqual(response.status,206)
             self.assertEqual(response.read(),b'st-m')
-            self.assertTrue((proxy.cache_dir / f"{job['id']}.mp4").is_file())
+            self.assertTrue((proxy.cache_dir / job['id'] / 'v1.mp4').is_file())
         finally:
             self.base=original
             if getattr(proxy,'downloads',None): proxy.downloads.close()
@@ -196,12 +200,12 @@ class BundleTests(unittest.TestCase):
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
         files = json.loads(gzip.decompress(base64.b64decode(module.BUNDLE_GZ_B64)))
+        # Colab 只带后端三个文件：不再有 jobstore 和 public 前端。
+        self.assertEqual(set(files), {"installer_runtime.py", "server.py", "progress_runner.py"})
         # 构建时会把 APP_VERSION 换成 git 版本号，比较前先抹掉。
         strip = lambda text: __import__("re").sub(r'APP_VERSION = "[^"]+"', 'APP_VERSION = "X"', text)
         self.assertEqual(strip(files["server.py"]),
                          strip((ROOT / "studio" / "server.py").read_text(encoding="utf-8")))
-        self.assertEqual(strip(files["jobstore.py"]),
-                         strip((ROOT / "jobstore.py").read_text(encoding="utf-8")))
         import ast
         tree = ast.parse(files["installer_runtime.py"])
         prepare = next(n for n in tree.body if isinstance(n,ast.FunctionDef) and n.name=="prepare_environment")
