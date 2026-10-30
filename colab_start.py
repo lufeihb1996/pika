@@ -5,6 +5,7 @@
 启动器会读 APP_VERSION：源码有更新就重启服务；没有更新就只确保隧道在线。
 """
 import pathlib
+import shutil
 import subprocess
 import sys
 
@@ -17,12 +18,14 @@ def run(args, **kwargs):
     subprocess.run(args, check=True, **kwargs)
 
 
-if not (SRC / ".git").is_dir():
-    print(f"克隆 {REPO} → {SRC}")
-    run(["git", "clone", "--depth", "1", REPO, str(SRC)])
-else:
+if (SRC / ".git").is_dir():
     run(["git", "-C", str(SRC), "fetch", "--depth", "1", "origin", "main"])
     run(["git", "-C", str(SRC), "reset", "--hard", "origin/main"])
+else:
+    if SRC.exists():
+        shutil.rmtree(SRC)
+    print(f"克隆 {REPO} → {SRC}")
+    run(["git", "clone", "--depth", "1", REPO, str(SRC)])
 
 rev = subprocess.check_output(["git", "-C", str(SRC), "rev-parse", "--short", "HEAD"],
                               text=True).strip()
