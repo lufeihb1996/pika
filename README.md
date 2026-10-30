@@ -2,6 +2,16 @@
 
 手机与电脑可用的官方 Pika H3 Flex 视频工作台，参考 MOSS Mobile Studio 的任务流程，直接控制官方 CLI。网页可单独部署到 Vercel，任务服务与 GPU 运行在 Colab；网页的 /api 与 /media 经 Vercel 反向代理到固定 Cloudflare 隧道。
 
+## 从 GitHub 启动（推荐）
+
+仓库：<https://github.com/lufeihb1996/pika>
+
+1. 把 `colab_start.py` 的全部内容粘进 Colab 一格，运行。
+2. 它会 `git clone` 到 `/content/pika-src`、跑 `build_colab.py`、再启动工作台。
+3. 之后本地改完代码 `git push`，回 Colab 重跑这一格即可，不用再复制 60KB 打包。
+
+启动器按 `APP_VERSION`（构建时写成 `1.3.0-<commit>`）判断：源码有更新就重启服务，没有更新就只确保隧道在线。不会打断正在生成的任务。
+
 ## 已有官方脚本的会话
 
 1. 让已有脚本的测试视频跑完，等待进程退出并释放显存。不要重启或删除会话，否则可能丢失 scratch 缓存。

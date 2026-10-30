@@ -196,7 +196,12 @@ class BundleTests(unittest.TestCase):
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
         files = json.loads(gzip.decompress(base64.b64decode(module.BUNDLE_GZ_B64)))
-        self.assertEqual(files["server.py"], (ROOT / "studio" / "server.py").read_text(encoding="utf-8"))
+        # 构建时会把 APP_VERSION 换成 git 版本号，比较前先抹掉。
+        strip = lambda text: __import__("re").sub(r'APP_VERSION = "[^"]+"', 'APP_VERSION = "X"', text)
+        self.assertEqual(strip(files["server.py"]),
+                         strip((ROOT / "studio" / "server.py").read_text(encoding="utf-8")))
+        self.assertEqual(strip(files["jobstore.py"]),
+                         strip((ROOT / "jobstore.py").read_text(encoding="utf-8")))
         import ast
         tree = ast.parse(files["installer_runtime.py"])
         prepare = next(n for n in tree.body if isinstance(n,ast.FunctionDef) and n.name=="prepare_environment")

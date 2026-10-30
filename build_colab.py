@@ -1,19 +1,47 @@
-"""Bundle the local app and setup helper as one copyable Colab cell, without credentials."""
+"""Bundle the local app and setup helper as one copyable Colab cell, without credentials.
+
+每次构建把 git 版本号写进 APP_VERSION，这样 Colab 重跑启动格时能判断代码是否更新，
+不会因为版本号固定为 1.3.0 而跳过重启服务。
+"""
 import base64
 import gzip
 import json
 from pathlib import Path
 import py_compile
 import shutil
+import subprocess
+import time
 
 root = Path(__file__).resolve().parent
+WATCHED = ("studio", "jobstore.py", "local_media.py", "local_web.py", "colab_launcher.py")
+BASE_VERSION = 'APP_VERSION = "1.3.0"'
+
+
+def build_version():
+    try:
+        rev = subprocess.check_output(["git", "rev-parse", "--short", "HEAD"],
+                                      cwd=root, text=True).strip()
+        dirty = subprocess.check_output(["git", "status", "--porcelain", "--", *WATCHED],
+                                        cwd=root, text=True).strip()
+        return f"1.3.0-{rev}" + ("-dirty" if dirty else "")
+    except (OSError, subprocess.CalledProcessError):
+        return "1.3.0-" + time.strftime("%Y%m%d-%H%M")
+
+
+version = build_version()
+stamp = f'APP_VERSION = "{version}"'
+
 files = {"installer_runtime.py": (root / "installer_runtime.py").read_text(encoding="utf-8"),
          "jobstore.py": (root / "jobstore.py").read_text(encoding="utf-8")}
 for file in sorted((root / "studio").rglob("*")):
     if file.is_file() and file.suffix in {".py", ".html", ".css", ".js", ".json"}:
         files[file.relative_to(root / "studio").as_posix()] = file.read_text(encoding="utf-8")
+files["server.py"] = files["server.py"].replace(BASE_VERSION, stamp)
+
 bundle = base64.b64encode(gzip.compress(json.dumps(files, ensure_ascii=False).encode(), mtime=0)).decode()
-source = (root / "colab_launcher.py").read_text(encoding="utf-8").replace("__BUNDLE_PLACEHOLDER__", bundle)
+source = (root / "colab_launcher.py").read_text(encoding="utf-8")
+source = source.replace("__BUNDLE_PLACEHOLDER__", bundle).replace(BASE_VERSION, stamp)
+
 out = root / "dist"
 out.mkdir(exist_ok=True)
 target = out / "00_Colab_官方工作台_一键启动.py"
@@ -39,4 +67,4 @@ web = root / "vercel-web"
 for f in (root / "studio" / "public").iterdir():
     if f.is_file():
         shutil.copy2(f, web / "public" / f.name)
-print(f"Built {target} ({len(source.encode())/1024:.1f} KiB); {len(files)} bundled files")
+print(f"Built {target} ({len(source.encode())/1024:.1f} KiB); {len(files)} bundled files; version {version}")
