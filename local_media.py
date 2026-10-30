@@ -1,0 +1,317 @@
+"""Persistent local task tracker and bounded automatic video downloader."""
+from __future__ import annotations
+import http.client
+import json
+import os
+from pathlib import Path
+import queue
+import re
+import secrets
+import threading
+import time
+from urllib.parse import urlsplit
+
+from jobstore import JobStore
+
+JOB_ID = re.compile(r'^[0-9a-f]{32}$')
+USER_AGENT = 'PikaStudioLocal/1.0'
+
+
+def proxy_address(host):
+    """读取系统 HTTPS_PROXY；NO_PROXY 命中时返回 None（测试里的 127.0.0.1 就走直连）。"""
+    no_proxy = os.environ.get('NO_PROXY') or os.environ.get('no_proxy') or ''
+    for item in no_proxy.replace(';', ',').split(','):
+        item = item.strip().lstrip('.')
+        if item and (host == item or host.endswith('.' + item)):
+            return None
+    raw = os.environ.get('HTTPS_PROXY') or os.environ.get('https_proxy') or ''
+    if not raw:
+        return None
+    url = urlsplit(raw if '://' in raw else 'http://' + raw)
+    if not url.hostname:
+        return None
+    return url.hostname, url.port or 8080
+
+
+def open_connection(url, timeout=30):
+    """到 upstream 的连接。系统有 HTTPS_PROXY 时走 CONNECT 隧道：
+    本机直连 Cloudflare 要 10–15 秒且常常超时，经代理只要 1.5 秒。"""
+    host = url.hostname
+    port = url.port or (443 if url.scheme == 'https' else 80)
+    cls = http.client.HTTPSConnection if url.scheme == 'https' else http.client.HTTPConnection
+    proxy = proxy_address(host)
+    last = None
+    for _ in range(3):
+        conn = cls(proxy[0], proxy[1], timeout=timeout) if proxy else cls(host, port, timeout=timeout)
+        if proxy:
+            conn.set_tunnel(host, port)
+        try:
+            conn.connect()
+            conn.sock.settimeout(timeout)
+            return conn
+        except (OSError, http.client.HTTPException) as exc:
+            last = exc
+            conn.close()
+    raise last
+
+
+class Downloads:
+    def __init__(self, upstream, root, user_agent=USER_AGENT, interval=3.5, retry_delays=(0, 2, 5, 10)):
+        self.upstream, self.root = upstream, Path(root)
+        self.root.mkdir(parents=True, exist_ok=True)
+        self.user_agent, self.interval, self.retry_delays = user_agent, interval, retry_delays
+        self.lock = threading.RLock()
+        self.stop = threading.Event()
+        self.wake = threading.Event()
+        self.pending = queue.Queue()
+        self.scheduled = set()
+        self.jobs = {}
+        self.online = False
+        self.last_error = ''
+        self.last_checked = None
+        self.connections = set()
+        self.busy = threading.Event()
+        self.store = JobStore(self.root / 'studio.db', migrate_dir=self.root)
+        for job in self.store.all():
+            if JOB_ID.fullmatch(str(job.get('id', ''))):
+                self.jobs[job['id']] = job
+        for job in self.jobs.values():
+            target = self.root / (job['id'] + '.mp4')
+            if target.is_file() and target.stat().st_size > 0:
+                known = job.get('download', {}).get('total_bytes')
+                if known and known != target.stat().st_size:
+                    job['download'] = dict(status='failed', error='本地文件长度不符，请重试下载')
+                else:
+                    size = target.stat().st_size
+                    job['download'] = dict(status='ready', downloaded_bytes=size, total_bytes=size, bytes_per_second=0)
+            elif job.get('download', {}).get('status') in {'ready', 'downloading'}:
+                job['download'] = dict(status='queued')
+        self.threads = [threading.Thread(target=self.worker, daemon=True) for _ in range(2)]
+        self.threads.append(threading.Thread(target=self.monitor, daemon=True))
+        for thread in self.threads:
+            thread.start()
+        for job in list(self.jobs.values()):
+            self.schedule(job['id'])
+
+    def connection(self, timeout=60):
+        conn = open_connection(self.upstream, timeout)
+        with self.lock:
+            self.connections.add(conn)
+        return conn
+
+    def close_connection(self, conn):
+        conn.close()
+        with self.lock:
+            self.connections.discard(conn)
+
+    def save(self, job):
+        self.store.put(job)
+
+    def upsert(self, job):
+        jid = str(job.get('id', ''))
+        if not JOB_ID.fullmatch(jid):
+            return
+        with self.lock:
+            previous = self.jobs.get(jid, {})
+            # 远端带了新的 take 号才说明是重新生成；没带就沿用本地下载结果。
+            if job.get('take') is not None and job.get('take') != previous.get('take'):
+                download = {'status': 'pending'}
+            else:
+                download = previous.get('download', {'status': 'pending'})
+            self.jobs[jid] = {**job, 'download': download,
+                              'hidden': previous.get('hidden', False),
+                              'editor_params': previous.get('editor_params')}
+            self.save(self.jobs[jid])
+        self.schedule(jid)
+
+    def schedule(self, jid, retry=False):
+        with self.lock:
+            job = self.jobs.get(jid)
+            if not job or job.get('hidden') or job.get('status') != 'done' or jid in self.scheduled:
+                return
+            status = job.get('download', {}).get('status')
+            if status == 'ready' or (status == 'failed' and not retry):
+                return
+            self.scheduled.add(jid)
+            job['download'] = {**job.get('download', {}), 'status': 'queued', 'error': ''}
+            self.save(job)
+            self.pending.put(jid)
+
+    def update(self, jid, **values):
+        with self.lock:
+            job = self.jobs[jid]
+            job['download'] = {**job.get('download', {}), **values}
+            self.save(job)
+
+    def state(self):
+        with self.lock:
+            jobs = sorted((j for j in self.jobs.values() if not j.get('hidden')), key=lambda j: j.get('created', 0), reverse=True)
+            return json.loads(json.dumps(dict(local=True, engine_online=self.online, error=self.last_error,
+                                             last_checked=self.last_checked, output_directory=str(self.root), jobs=jobs)))
+
+    def create_shot(self, params):
+        params = self.shot_params(params)
+        with self.lock:
+            job = dict(id=secrets.token_hex(16), status='draft', stage='草稿 · 尚未提交生成',
+                       created=time.time(), params=params, download={'status': 'pending'}, local_draft=True)
+            self.jobs[job['id']] = job
+            self.save(job)
+            return json.loads(json.dumps(job))
+
+    @staticmethod
+    def shot_params(params):
+        if not isinstance(params, dict):
+            raise ValueError('镜头参数必须是对象')
+        defaults=dict(task='t2va', prompt='', resolution='480p', duration=5, aspect='16:9',
+                      seed=None, cpu_offload=None, first_image='', last_image='', references=[])
+        defaults.update({k:v for k,v in params.items() if k in defaults})
+        if defaults['cpu_offload'] is None:
+            # 480p 任意时长、768p 5 秒都不需要卸载；768p 更长的档位才默认开启。
+            defaults['cpu_offload'] = defaults['resolution'] == '768p' and defaults['duration'] > 5
+        if not isinstance(defaults['prompt'], str) or len(defaults['prompt'])>8000:
+            raise ValueError('提示词长度不正确')
+        return defaults
+
+    def edit_shot(self, jid, params):
+        params = self.shot_params(params)
+        with self.lock:
+            job=self.jobs[jid]
+            if job['status'] in {'running','queued','cancelling'}:
+                raise ValueError('已提交任务的参数已冻结，请先取消，或新建镜头')
+            if job['status']=='draft':
+                job['params']=params
+            else:
+                # Preserve original parameters associated with an existing successful video.
+                job['editor_params']=params
+            self.save(job)
+            return json.loads(json.dumps(job))
+
+    def delete_shot(self, jid):
+        with self.lock:
+            job=self.jobs[jid]
+            if job['status'] in {'running','queued','cancelling'}:
+                raise ValueError('请先取消正在生成或排队的任务，再移出列表')
+            job['hidden']=True
+            self.save(job)
+
+    def refresh(self):
+        conn = self.connection()
+        try:
+            conn.request('GET', '/api/jobs', headers={'User-Agent': self.user_agent, 'Accept-Encoding': 'identity'})
+            response = conn.getresponse()
+            if response.status != 200:
+                raise RuntimeError(f'Colab 接口 HTTP {response.status}')
+            data = json.loads(response.read(8 * 1024**2).decode('utf-8'))
+            if not isinstance(data.get('jobs'), list):
+                raise ValueError('隧道返回的不是 Pika 任务列表')
+            for job in data['jobs']:
+                self.upsert(job)
+            with self.lock:
+                self.online, self.last_error, self.last_checked = True, '', time.time()
+        finally:
+            self.close_connection(conn)
+
+    def monitor(self):
+        while not self.stop.is_set():
+            self.wake.clear()
+            try:
+                self.refresh()
+            except Exception as exc:
+                with self.lock:
+                    self.online, self.last_error, self.last_checked = False, str(exc), time.time()
+            # 下载期间把轮询降到 12 秒，别和下载抢同一条隧道。
+            self.wake.wait(12 if self.busy.is_set() else self.interval)
+
+    def worker(self):
+        while not self.stop.is_set():
+            try:
+                jid = self.pending.get(timeout=.3)
+            except queue.Empty:
+                continue
+            try:
+                for attempt, delay in enumerate(self.retry_delays):
+                    if self.stop.wait(delay):
+                        break
+                    try:
+                        self.download(jid)
+                        break
+                    except Exception as exc:
+                        final = attempt == len(self.retry_delays)-1
+                        if final:
+                            # 先放开排队标记，再写 failed：否则外部马上重试会被当成重复任务丢掉。
+                            with self.lock:
+                                self.scheduled.discard(jid)
+                        self.update(jid, status='failed' if final else 'retrying', error=str(exc),
+                                    bytes_per_second=0, attempt=attempt+1)
+            finally:
+                with self.lock:
+                    self.scheduled.discard(jid)
+                self.pending.task_done()
+
+    def download(self, jid):
+        target = self.root / (jid + '.mp4')
+        part = target.with_suffix('.part')
+        offset = part.stat().st_size if part.exists() else 0
+        self.update(jid, status='downloading', downloaded_bytes=offset, bytes_per_second=0, error='')
+        self.busy.set()
+        conn = self.connection()
+        try:
+            headers = {'User-Agent': self.user_agent, 'Accept-Encoding': 'identity'}
+            if offset:
+                headers['Range'] = f'bytes={offset}-'
+            conn.request('GET', '/media/' + jid, headers=headers)
+            response = conn.getresponse()
+            if response.status == 416:
+                part.unlink(missing_ok=True)
+                raise RuntimeError('断点失效，下次尝试从头下载')
+            if response.status not in {200, 206}:
+                raise RuntimeError(f'下载 HTTP {response.status}')
+            if 'video/mp4' not in response.getheader('Content-Type', '').lower():
+                raise RuntimeError('服务器没有返回 MP4 视频')
+            length = int(response.getheader('Content-Length', '0'))
+            if length <= 0:
+                raise RuntimeError('服务器未提供有效文件长度')
+            if response.status == 206:
+                match = re.fullmatch(r'bytes (\d+)-(\d+)/(\d+)', response.getheader('Content-Range', ''))
+                if not match or int(match[1]) != offset:
+                    raise RuntimeError('断点响应范围不正确')
+                total, mode = int(match[3]), 'ab'
+            else:
+                offset, total, mode = 0, length, 'wb'
+            self.update(jid, total_bytes=total, downloaded_bytes=offset)
+            received = 0
+            started = previous = time.monotonic()
+            with part.open(mode) as handle:
+                while not self.stop.is_set():
+                    block = response.read1(64 * 1024)
+                    if not block:
+                        break
+                    handle.write(block)
+                    received += len(block)
+                    now = time.monotonic()
+                    if now - previous >= .25:
+                        handle.flush()
+                        self.update(jid, downloaded_bytes=offset + received,
+                                    bytes_per_second=round(received / max(.001, now - started)))
+                        previous = now
+            if self.stop.is_set():
+                raise RuntimeError('本地服务停止，下载已保留断点')
+            if received != length or part.stat().st_size != total:
+                raise RuntimeError(f'下载未完整：{part.stat().st_size}/{total} 字节，已保留断点')
+            part.replace(target)
+            self.update(jid, status='ready', downloaded_bytes=total, total_bytes=total,
+                        bytes_per_second=0, error='', finished=time.time())
+        finally:
+            self.close_connection(conn)
+            self.busy.clear()
+
+    def close(self):
+        self.stop.set()
+        self.wake.set()
+        with self.lock:
+            connections = list(self.connections)
+        for conn in connections:
+            conn.close()
+        for thread in self.threads:
+            thread.join(timeout=1)
+        self.store.close()

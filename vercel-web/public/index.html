@@ -1,0 +1,428 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <meta name="theme-color" content="#07090e" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <title>Pika H3 Flex Studio · 影视导演台</title>
+  <link rel="manifest" href="/manifest.json" />
+  <link rel="stylesheet" href="/style.css" />
+  <script src="/app.js" defer></script>
+</head>
+<body>
+  <!-- Top Navigation & Live Telemetry (AI_Anime_Studio Style) -->
+  <header class="topbar">
+    <div class="brand-wrap">
+      <div class="brand-icon">
+        <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <rect x="2" y="2" width="20" height="20" rx="2.18" ry="2.18"></rect>
+          <line x1="7" y1="2" x2="7" y2="22"></line>
+          <line x1="17" y1="2" x2="17" y2="22"></line>
+          <line x1="2" y1="12" x2="22" y2="12"></line>
+          <line x1="2" y1="7" x2="7" y2="7"></line>
+          <line x1="2" y1="17" x2="7" y2="17"></line>
+          <line x1="17" y1="17" x2="22" y2="17"></line>
+          <line x1="17" y1="7" x2="22" y2="7"></line>
+        </svg>
+      </div>
+      <div>
+        <div class="brand-title">Pika H3 Flex Studio <span class="badge-tag">Pika-H3-Flex</span></div>
+        <div class="brand-sub">A100 导演控制台 · 官方原生 6 步音画同生工作流</div>
+      </div>
+    </div>
+
+    <nav class="workspace-switcher" aria-label="工作区切换">
+      <button type="button" class="workspace-switch-btn selected" data-tab="create">🎬 视频导演台</button>
+      <button type="button" class="workspace-switch-btn" data-tab="history">📁 本地作品 <span id="job-count" class="tab-pill">0</span></button>
+      <button type="button" class="workspace-switch-btn" data-tab="logs">🖥️ 终端日志</button>
+    </nav>
+
+    <div class="top-center-stats">
+      <div class="health-pill" id="healthPill" title="Colab 远端引擎状态">
+        <span id="cloudDot" class="status-pulse offline"></span>
+        <span id="connection" class="connection health-label"><i></i>连接中</span>
+      </div>
+
+      <div class="queue-pill" title="当前 GPU 任务队列进度">
+        <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2">
+          <polyline points="22 12 18 12 15 21 9 3 6 12 2 12"></polyline>
+        </svg>
+        <span id="queueText">队列空闲</span>
+        <div class="mini-bar-track">
+          <div id="queueProgress" class="mini-bar-fill"></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="topbar-actions">
+      <button type="button" id="refresh" class="btn btn-ghost" title="立即刷新云端状态与任务队列">
+        <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2">
+          <path d="M21.5 2v6h-6M21.34 15.57a10 10 0 1 1-.57-8.38l5.67-5.67"/>
+        </svg>
+        <span>刷新</span>
+      </button>
+
+      <button type="button" id="settings" class="btn btn-ghost" aria-label="设置" title="设置 Colab 笔记本快捷跳转链接">
+        <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2">
+          <circle cx="12" cy="12" r="3"></circle>
+          <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"></path>
+        </svg>
+        <span>设置</span>
+      </button>
+    </div>
+  </header>
+
+  <!-- 3-Column Studio Grid Layout (AI_Anime_Studio Architecture) -->
+  <main class="studio-layout">
+    <!-- Left Navigation: Filter & Shot Presets -->
+    <aside class="sidebar-panel">
+      <div class="panel-box">
+        <div class="panel-head">
+          <div class="head-title">
+            <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path>
+            </svg>
+            <span>任务筛选 <small id="filterCount" class="project-count">(0)</small></span>
+          </div>
+        </div>
+        <div id="filterList" class="nav-stack" role="navigation" aria-label="任务状态筛选">
+          <button type="button" class="nav-item active" data-filter="all">
+            <span class="nav-label">🎬 全部镜头任务</span>
+            <span class="nav-count" id="count-all">0</span>
+          </button>
+          <button type="button" class="nav-item" data-filter="active">
+            <span class="nav-label">⚡ 生成中 / 排队中</span>
+            <span class="nav-count" id="count-active">0</span>
+          </button>
+          <button type="button" class="nav-item" data-filter="done">
+            <span class="nav-label">✅ 已保存本机</span>
+            <span class="nav-count" id="count-done">0</span>
+          </button>
+          <button type="button" class="nav-item" data-filter="failed">
+            <span class="nav-label">⚠️ 失败 / 已中断</span>
+            <span class="nav-count" id="count-failed">0</span>
+          </button>
+        </div>
+      </div>
+
+      <div class="panel-box flex-grow">
+        <div class="panel-head">
+          <div class="head-title">
+            <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2">
+              <polygon points="23 7 16 12 23 17 23 7"></polygon>
+              <rect x="1" y="5" width="15" height="14" rx="2" ry="2"></rect>
+            </svg>
+            <span>导演预设分镜</span>
+          </div>
+          <div class="panel-head-actions">
+            <button type="button" id="newBlankShotBtn" class="icon-btn btn-xs" title="清空并新建空白镜头">＋</button>
+          </div>
+        </div>
+        <div id="presetList" class="nav-stack" aria-label="导演预设分镜模板"></div>
+      </div>
+    </aside>
+
+    <!-- Center Workspace: Monitor Stage, Shot Table & Galleries -->
+    <section class="main-workspace">
+      <!-- Tab 1: Video Director Console -->
+      <div id="create-panel" class="director-workspace">
+        <div id="videoSceneHeader" class="scene-header">
+          <div class="scene-header-top">
+            <div class="scene-title-group">
+              <div class="scene-icon-wrap">🎬</div>
+              <h2 id="sceneTitle">视频导演台 · 镜头队列</h2>
+              <div id="sceneSummary" class="scene-stat-pill">0 个 Shot · 官方 6 步采样</div>
+            </div>
+            <div class="scene-header-project-actions">
+              <button type="button" id="addShotBtn" class="btn btn-secondary btn-sm">＋ 新建镜头</button>
+              <button type="button" id="toggleMonitorBtn" class="btn btn-secondary btn-sm" title="展开或折叠上方视频监看台">📺 监看屏</button>
+              <button type="button" id="openLogsBtn" class="btn btn-secondary btn-sm" title="查看当前任务的官方 CLI 日志">🖥️ 终端日志</button>
+              <button type="button" id="quickSubmitBtn" class="btn btn-primary btn-sm" title="将右侧镜头配置加入 GPU 生成队列">▶ 加入生成队列</button>
+            </div>
+          </div>
+        </div>
+
+        <!-- Cinema Monitor HUD (Matches AI_Anime_Studio #mainVideoPanel) -->
+        <div id="mainVideoPanel" class="main-video-panel" hidden>
+          <div id="preview" class="main-video-stage preview">
+            <div class="empty-preview">
+              <div class="frame-art"><span>▶</span><i></i><i></i><i></i></div>
+              <h3>等待选择或生成镜头</h3>
+              <p>在右侧导演检查器配置提示词与参数，或点击下方列表预览成片</p>
+            </div>
+          </div>
+          <div class="main-video-info">
+            <div class="main-video-kicker">
+              <span id="monitorStatusDot" class="video-status-dot"></span>
+              <span id="monitorStatusLabel">导演监看器</span>
+              <span id="monitorShotNo" class="shot-no-badge">READY</span>
+              <button type="button" id="closeMonitorBtn" class="main-video-close" title="折叠监看器">✕ 折叠</button>
+            </div>
+            <div id="monitorTitle" class="main-video-title">Pika H3 Flex 音画创作台</div>
+            <div id="monitorMeta" class="main-video-meta">480p / 768p · 5–15s · 单 GPU 串行队列</div>
+            <div id="current-job" class="current-job-box">
+              <div class="queue-empty">暂无任务，在右侧填写镜头设置后点击「加入生成队列」。</div>
+            </div>
+            <div id="result-actions" class="main-video-actions result-actions" hidden></div>
+          </div>
+        </div>
+
+        <!-- Shot Queue Table View (Matches AI_Anime_Studio .shot-table) -->
+        <div id="tableView" class="view-container table-wrap">
+          <table class="shot-table">
+            <thead>
+              <tr>
+                <th width="72">Shot</th>
+                <th width="92">模式</th>
+                <th>镜头提示词 / 规格参数</th>
+                <th width="190">进度</th>
+                <th width="82">耗时</th>
+                <th width="200" style="text-align:right">操作</th>
+              </tr>
+            </thead>
+            <tbody id="shotRows"></tbody>
+          </table>
+        </div>
+
+        <!-- Bottom Collapsible CLI Log Drawer -->
+        <details id="log-details" class="log-drawer">
+          <summary>
+            <span>🖥️ 查看当前镜头 CLI 运行日志</span>
+            <span class="muted">展开实时输出</span>
+          </summary>
+          <pre id="logs">暂无任务</pre>
+        </details>
+      </div>
+
+      <!-- Tab 2: Cloud Works Gallery -->
+      <section id="history-panel" class="sub-workspace" hidden>
+        <div class="scene-header">
+          <div class="scene-header-top">
+            <div class="scene-title-group">
+              <div class="scene-icon-wrap">📁</div>
+              <h2>本地作品</h2>
+              <div class="scene-stat-pill">生成后自动下载到电脑，完成后即可本地播放</div>
+            </div>
+          </div>
+        </div>
+        <p id="output-directory" class="hint" style="padding:0 20px"></p><div id="history-grid" class="view-container gallery"></div>
+      </section>
+
+      <!-- Tab 4: Full Terminal Logs -->
+      <section id="logs-panel" class="sub-workspace" hidden>
+        <div class="scene-header">
+          <div class="scene-header-top">
+            <div class="scene-title-group">
+              <div class="scene-icon-wrap">🖥️</div>
+              <h2>官方 CLI 实时终端日志</h2>
+              <div id="logJobIndicator" class="scene-stat-pill">当前选中任务日志</div>
+            </div>
+            <div class="scene-header-project-actions">
+              <button type="button" id="refreshFullLogBtn" class="btn btn-secondary btn-sm">刷新日志 ↻</button>
+            </div>
+          </div>
+        </div>
+        <div class="view-container log-console-wrap">
+          <pre id="full-logs" class="full-log-pre">暂无任务日志</pre>
+        </div>
+      </section>
+    </section>
+
+    <!-- Right Inspector: Shot Editor & Media Station (Matches AI_Anime_Studio #editorPanel) -->
+    <aside class="editor-panel" id="editorPanel">
+      <form id="composer" class="editor-body">
+        <!-- Sticky Inspector Header -->
+        <div class="editor-header">
+          <div class="editor-shot-title">
+            <span class="inspector-heading">
+              <small>镜头设置 · PIKA H3 FLEX</small>
+              <strong id="inspectorModeTitle">T2VA · 文生视频</strong>
+            </span>
+            <span id="inspectorStatusBadge" class="badge-status status-done">6 步原生</span>
+          </div>
+          <div class="editor-top-actions">
+            <button type="button" id="saveShotBtn" class="btn btn-secondary btn-sm">保存</button>
+            <button type="button" id="resetComposerBtn" class="btn btn-secondary btn-sm" title="清空当前表单">重置</button>
+            <button type="submit" id="generate" class="btn btn-primary btn-sm">▶ 加入队列</button>
+          </div>
+        </div>
+
+        <!-- 5-Mode Segmented Selector Card -->
+        <div class="mode-card">
+          <div class="mode-segmented mode-segmented-5" id="modeButtons" role="tablist" aria-label="生成模式">
+            <button type="button" class="mode-btn active" data-mode="t2va">
+              <span class="mode-tag t2v">T2VA</span>
+              <span class="mode-name">文生视频</span>
+            </button>
+            <button type="button" class="mode-btn" data-mode="i2va">
+              <span class="mode-tag cut">I2VA</span>
+              <span class="mode-name">首帧图生</span>
+            </button>
+            <button type="button" class="mode-btn" data-mode="l2va">
+              <span class="mode-tag continue">L2VA</span>
+              <span class="mode-name">尾帧引导</span>
+            </button>
+            <button type="button" class="mode-btn" data-mode="fl2va">
+              <span class="mode-tag fl2v">FL2VA</span>
+              <span class="mode-name">首尾接续</span>
+            </button>
+            <button type="button" class="mode-btn" data-mode="ref2va">
+              <span class="mode-tag ref2v">REF2VA</span>
+              <span class="mode-name">多参考</span>
+            </button>
+          </div>
+          <select id="task" class="form-select" hidden aria-label="生成方式">
+            <option value="t2va">文生视频 · 从描述出发</option>
+            <option value="i2va">图生视频 · 让首帧动起来</option>
+            <option value="l2va">尾帧引导 · 抵达指定画面</option>
+            <option value="fl2va">首尾帧 · 连接两个瞬间</option>
+            <option value="ref2va">多参考 · 融合图片、视频与声音</option>
+          </select>
+          <div id="modeTip" class="mode-tip">
+            <strong>T2VA 文生视频</strong>：纯文本生成音画同步视频，无需上传参考图，支持对白、音效与配乐描述。
+          </div>
+        </div>
+
+        <!-- Basic Generation Parameters -->
+        <div class="editor-section shot-params-section">
+          <div class="section-title">镜头基本参数</div>
+
+          <div class="shot-grid-2">
+            <div class="form-group">
+              <label class="form-label" for="resolution">输出分辨率</label>
+              <select id="resolution" class="form-select">
+                <option value="480p">480p · 快速试片 (推荐)</option>
+                <option value="768p">768p · 高清精制</option>
+              </select>
+            </div>
+            <div class="form-group">
+              <label class="form-label" for="duration">视频时长</label>
+              <select id="duration" class="form-select"></select>
+            </div>
+          </div>
+
+          <div class="form-group">
+            <div class="form-label-row">
+              <label class="form-label" for="aspect">画面比例</label>
+              <span class="label-hint">快捷切换或选择全部 11 种画幅</span>
+            </div>
+            <div class="aspect-chips" id="aspect-chips">
+              <button type="button" data-aspect="16:9" class="selected">▭ <span>16:9 横屏</span></button>
+              <button type="button" data-aspect="9:16">▯ <span>9:16 竖屏</span></button>
+              <button type="button" data-aspect="1:1">□ <span>1:1 方图</span></button>
+            </div>
+            <select id="aspect" class="form-select" aria-label="全部画幅">
+              <option>16:9</option><option>9:16</option><option>1:1</option>
+              <option>21:9</option><option>3:2</option><option>4:3</option>
+              <option>5:4</option><option>4:5</option><option>3:4</option>
+              <option>2:3</option><option>9:21</option>
+            </select>
+          </div>
+
+          <div class="shot-grid-2">
+            <div class="form-group shot-seed-group">
+              <div class="form-label-row">
+                <label class="form-label" for="seed">Seed (种子)</label>
+                <div class="seed-actions">
+                  <button type="button" id="seedRandBtn" class="btn btn-ghost btn-xs" title="清空以随机生成">🎲 随机</button>
+                  <button type="button" id="seed42Btn" class="btn btn-ghost btn-xs" title="固定为 42">固定 42</button>
+                </div>
+              </div>
+              <input id="seed" class="form-input font-mono" type="number" min="0" max="9007199254740991" step="1" placeholder="留空随机" />
+            </div>
+
+            <div class="form-group">
+              <label class="form-label" for="offload">显存策略</label>
+              <label class="offload-check-pill" for="offload">
+                <input id="offload" type="checkbox" />
+                <span>开启 CPU 卸载 <small>768p 长视频才需要</small></span>
+              </label>
+            </div>
+          </div>
+
+          <p id="render-note" class="render-note">建议先用 480p / 5 秒验证，确认效果后再提高规格。</p>
+        </div>
+
+        <!-- Reference Studio Section -->
+        <div class="editor-section" id="shotReferencesSection">
+          <div class="section-title-row">
+            <div class="section-title">参考素材工坊 (References)</div>
+            <span id="refModeHint" class="section-sub">点击上传图片 / 视频 / 音频</span>
+          </div>
+
+          <div id="t2va-ref-notice" class="t2va-ref-notice">
+            当前为 <strong>T2VA 纯文字模式</strong>，无需上传素材。如需首尾帧垫图或多模态融合，请点击上方切换模式。
+          </div>
+
+          <div id="endpoint-inputs" class="ref-slots-grid upload-grid"></div>
+
+          <div id="reference-inputs" hidden>
+            <label class="drop-zone ref-multi-drop" for="reference-files">
+              <span>＋</span>
+              <b>添加参考图片、视频或音频</b>
+              <small>最多 9 图 / 3 视频 / 3 音频，总计 12 个（按上传顺序对应提示词）</small>
+            </label>
+            <input id="reference-files" type="file" multiple accept="image/png,image/jpeg,image/webp,video/mp4,video/quicktime,video/webm,audio/*" hidden />
+            <div id="reference-list" class="reference-list"></div>
+            <p class="hint">至少 1 张图或 1 个视频。视频、音频各 2–15 秒，两类分别合计不超过 15 秒。</p>
+          </div>
+        </div>
+
+        <!-- Prompt & Audio Studio Section -->
+        <div class="editor-section prompt-studio-section">
+          <div class="section-title-row prompt-studio-title-row">
+            <div class="section-title">提示词 (画面与声音)</div>
+            <span id="char-count" class="label-hint font-mono">0 / 8000</span>
+          </div>
+
+          <div class="form-group">
+            <textarea id="prompt" class="form-textarea" maxlength="8000" rows="7" placeholder="描述场景、主体动作、镜头运镜，以及人物对白、环境音或背景音乐。让声音也成为故事的一部分…" required></textarea>
+          </div>
+
+          <button type="submit" id="generateBottomBtn" class="btn btn-primary prompt-submit-btn">
+            <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2">
+              <polygon points="5 3 19 12 5 21 5 3"></polygon>
+            </svg>
+            <span>加入生成队列</span>
+          </button>
+          <p class="footnote">声音同步生成 · 成片自动下载到电脑 · 单 GPU 串行执行</p>
+        </div>
+      </form>
+    </aside>
+  </main>
+
+  <!-- Toast Notification -->
+  <div id="toast" role="status" aria-live="polite"></div>
+
+  <!-- Settings Modal Dialog -->
+  <dialog id="settings-dialog" class="studio-dialog">
+    <form method="dialog">
+      <div class="dialog-header">
+        <div class="dialog-title">
+          <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2">
+            <circle cx="12" cy="12" r="3"></circle>
+            <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"></path>
+          </svg>
+          <h2>导演工作台设置</h2>
+        </div>
+        <button class="icon-btn" aria-label="关闭设置">✕</button>
+      </div>
+      <div class="dialog-body">
+        <div class="form-group">
+          <label class="form-label" for="colab-url">Google Colab 笔记本链接</label>
+          <input id="colab-url" class="form-input" type="url" placeholder="https://colab.research.google.com/drive/…" />
+          <p class="hint">保存后，可从电脑或手机一键跳转到你的 Colab 笔记本点击运行启动格。</p>
+        </div>
+        <div class="button-row">
+          <button type="button" id="save-settings" class="btn btn-secondary">💾 保存链接</button>
+          <button type="button" id="open-colab" class="btn btn-primary">🚀 打开 Colab ↗</button>
+        </div>
+        <div class="info-callout">
+          <strong>提示：</strong>本工作台通过固定隧道连接 Colab A100 上的官方 <code>pika-h3-pro</code> 引擎。Colab 离线时仍可随时浏览「本地作品」。
+        </div>
+      </div>
+    </form>
+  </dialog>
+</body>
+</html>
