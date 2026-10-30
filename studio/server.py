@@ -245,7 +245,15 @@ class Studio:
                         elif "loading weights" in lower:
                             stage = "加载 Qwen3-VL 视觉语言编码器权重"
                         elif "loading checkpoint shards" in lower:
-                            stage = "加载 Pika-H3 主模型分片 (14 Shards)"
+                            # 主模型是 7 个分片，VAE 解码器是 3 个（视频 2 + 音频 1），用分母区分。
+                            counts = re.findall(r"(\d+)/(\d+)", line)
+                            total = int(counts[-1][1]) if counts else 0
+                            if total == 3:
+                                stage = "加载视频与音频解码器"
+                            elif total > 0:
+                                stage = f"加载 Pika-H3 主模型分片（{total} 个）"
+                            else:
+                                stage = "加载模型分片"
                         elif "%|" in lower or "it/s" in lower or "s/it" in lower:
                             stage = "官方程序运行中（详见日志）"
                         elif "decod" in lower:
