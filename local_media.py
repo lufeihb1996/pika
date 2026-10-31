@@ -71,6 +71,7 @@ class Downloads:
         self.last_checked = None
         self.connections = set()
         self.busy = threading.Event()
+        self.missing = {}
         self.store = JobStore(self.root / 'studio.db', migrate_dir=self.root)
         for job in self.store.all():
             if JOB_ID.fullmatch(str(job.get('id', ''))):
@@ -198,14 +199,21 @@ class Downloads:
                 self.save(job)
             self.schedule(jid)
         # 本地还在跑、远端已经没有：Colab 重启或服务丢了内存队列。
+        # 连续两轮都看不到才判定中断，避免一次响应延迟就把正在跑的任务标死。
+        interrupted = 0
         with self.lock:
-            stale = [j for j in self.jobs.values()
-                     if j.get('status') in {'queued', 'running', 'cancelling'}
-                     and j.get('id') not in seen]
-            for job in stale:
-                job.update(status='interrupted', stage='Colab 服务重启，任务未完成')
-                self.save(job)
-        return len(stale)
+            for job in self.jobs.values():
+                job_id = job.get('id')
+                if job.get('status') not in {'queued', 'running', 'cancelling'} or job_id in seen:
+                    self.missing.pop(job_id, None)
+                    continue
+                count = self.missing.get(job_id, 0) + 1
+                self.missing[job_id] = count
+                if count >= 2:
+                    job.update(status='interrupted', stage='Colab 服务重启，任务未完成')
+                    self.save(job)
+                    interrupted += 1
+        return interrupted
 
     def schedule(self, jid, retry=False):
         with self.lock:

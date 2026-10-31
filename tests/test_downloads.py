@@ -105,14 +105,15 @@ class DownloadTests(unittest.TestCase):
         finally:server.shutdown();server.server_close()
 
     def test_shot_create_edit_delete_and_persistence(self):
-        self.manager=Downloads(self.url,self.root,interval=.1,retry_delays=(0,))
+        # 这个用例只测增删改，不需要轮询；interval 放大避免 monitor 把 running 标成中断。
+        self.manager=Downloads(self.url,self.root,interval=100,retry_delays=(0,))
         draft=self.manager.create_shot({})
         self.assertEqual(draft['status'],'draft')
         self.assertEqual(draft['params']['prompt'],'')
         self.manager.edit_shot(draft['id'],{'prompt':'a saved shot','seed':42})
         self.assertEqual(self.manager.jobs[draft['id']]['params']['seed'],42)
         self.manager.close();self.manager=None
-        self.manager=Downloads(self.url,self.root,interval=.1,retry_delays=(0,))
+        self.manager=Downloads(self.url,self.root,interval=100,retry_delays=(0,))
         self.assertEqual(self.manager.jobs[draft['id']]['params']['prompt'],'a saved shot')
         self.manager.delete_shot(draft['id'])
         self.assertFalse(any(j['id']==draft['id'] for j in self.manager.state()['jobs']))
@@ -121,10 +122,16 @@ class DownloadTests(unittest.TestCase):
         self.manager.merge_remote([remote])
         self.assertFalse(any(j['id']==remote['id'] for j in self.manager.state()['jobs']))
         active=self.manager.create_shot({'prompt':'busy'})
-        self.manager.jobs[active['id']]['status']='running'
-        # 远端也报同一个任务在跑，否则 monitor 会把它标成“Colab 重启导致中断”。
+        # 先让远端也报同一个任务在跑，再改本地状态，避免 monitor 在中间把它标成中断。
         self.jobs=[dict(id=active['id'],version=1,status='running')]
-        with self.assertRaises(ValueError):self.manager.delete_shot(active['id'])
+        self.manager.jobs[active['id']]['status']='running'
+        try:
+            self.manager.delete_shot(active['id'])
+        except ValueError:
+            pass
+        else:
+            self.fail(f"删除没有拦截；status={self.manager.jobs[active['id']]['status']} "
+                      f"remote={self.jobs}")
         with self.assertRaises(ValueError):self.manager.edit_shot(active['id'],{})
 
 
