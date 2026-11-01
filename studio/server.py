@@ -120,10 +120,14 @@ class Studio:
         if type(raw_sigma) is bool or not isinstance(raw_sigma, (int, float)) or not 0.1 <= float(raw_sigma) <= 0.99:
             raise ValueError("二采重噪强度 start_sigma 需在 0.1–0.99 之间")
         start_sigma = round(float(raw_sigma), 4)
+        raw_scale = data.get("upscale_factor", 2.0)
+        if type(raw_scale) is bool or not isinstance(raw_scale, (int, float)) or not 1.2 <= float(raw_scale) <= 3.0:
+            raise ValueError("二采放大倍率 upscale_factor 需在 1.2–3.0 之间")
+        upscale_factor = round(float(raw_scale), 3)
         return dict(prompt=prompt.strip(), task=task, resolution=res, duration=duration,
                     aspect=aspect, seed=seed, cpu_offload=offload, first_image=first,
                     last_image=last, references=cleaned, source_video=source_video,
-                    second_pass=second_pass, start_sigma=start_sigma)
+                    second_pass=second_pass, start_sigma=start_sigma, upscale_factor=upscale_factor)
 
     def submit(self, data):
         if self.preview or not self.cli.is_file():
@@ -171,7 +175,8 @@ class Studio:
         if p.get("source_video"):
             cmd.extend(["--source-video", str(self.upload_path(p["source_video"], "video"))])
         if p.get("second_pass") or p.get("source_video"):
-            cmd.extend(["--second-pass", "--start-sigma", str(p.get("start_sigma", 0.78))])
+            cmd.extend(["--second-pass", "--start-sigma", str(p.get("start_sigma", 0.78)),
+                        "--upscale-factor", str(p.get("upscale_factor", 2.0))])
         return cmd
 
     def cancel(self, job_id):

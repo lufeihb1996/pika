@@ -128,11 +128,12 @@ def build_refine_ladder(start_sigma=0.78, video_shift=12.0, audio_shift=3.0):
 
 
 def extract_pass2_args(argv):
-    """Strip --second-pass, --source-video, --start-sigma from argv before official CLI parser."""
+    """Strip --second-pass, --source-video, --start-sigma, --upscale-factor from argv before official CLI parser."""
     clean = []
     second_pass = False
     source_video = ""
     start_sigma = 0.78
+    upscale_factor = 2.0
     i = 0
     while i < len(argv):
         arg = argv[i]
@@ -146,10 +147,13 @@ def extract_pass2_args(argv):
         elif arg == "--start-sigma" and i + 1 < len(argv):
             start_sigma = float(argv[i + 1])
             i += 2
+        elif arg == "--upscale-factor" and i + 1 < len(argv):
+            upscale_factor = float(argv[i + 1])
+            i += 2
         else:
             clean.append(arg)
             i += 1
-    return clean, second_pass, source_video, start_sigma
+    return clean, second_pass, source_video, start_sigma, upscale_factor
 
 
 def _detect_upscaler_arch(sd):
@@ -314,8 +318,11 @@ def upscale_video_latent(video_external, scale=2.0):
     if video_external.ndim == 4:
         video_external = video_external.unsqueeze(0)
     B, F_lat, C, H, W = video_external.shape
-    H_out = max(2, int(round(H * scale / 2.0)) * 2)
-    W_out = max(2, int(round(W * scale / 2.0)) * 2)
+    eff_mult = float(scale)
+    if H * W > 1800:
+        eff_mult = max(1.15, min(eff_mult, math.sqrt(1600.0 / (H * W)) * eff_mult))
+    H_out = max(2, int(round(H * eff_mult / 2.0)) * 2)
+    W_out = max(2, int(round(W * eff_mult / 2.0)) * 2)
     effective_scale = math.sqrt((H_out / H) * (W_out / W))
 
     device = torch.device("cuda")
@@ -330,8 +337,8 @@ def upscale_video_latent(video_external, scale=2.0):
     return video_up
 
 
-def run_pass2_refine(args, source_video, start_sigma=0.78, cached_pair=None):
-    """Execute Single-Video Pass-2 1080p full-BF16 3-step refinement."""
+def run_pass2_refine(args, source_video, start_sigma=0.78, upscale_factor=2.0, cached_pair=None):
+    """Execute Single-Video Pass-2 full-BF16 3-step refinement."""
     import torch
     import pika_h3.pipeline as pipeline
     from pika_h3.cli import parse_refs
@@ -377,8 +384,9 @@ def run_pass2_refine(args, source_video, start_sigma=0.78, cached_pair=None):
     else:
         raise ValueError("二采精修缺少一采原片或潜变量输入")
 
-    emit("upscaling", "二采 1080p · 3D 潜变量 2.0x 等比放大")
-    video_up = upscale_video_latent(video_low, scale=2.0)
+    tier = "720p" if upscale_factor <= 1.6 else ("1K/1080p" if upscale_factor <= 2.1 else ("1.5K" if upscale_factor <= 2.35 else "2K"))
+    emit("upscaling", f"二采 {tier} · 3D 潜变量 {upscale_factor:g}x 等比放大")
+    video_up = upscale_video_latent(video_low, scale=upscale_factor)
     _, F_lat, _, H_out, W_out = video_up.shape
     height = H_out * 16
     width = W_out * 16
@@ -454,6 +462,7 @@ def run_pass2_refine(args, source_video, start_sigma=0.78, cached_pair=None):
         "seed": args.seed,
         "second_pass": True,
         "start_sigma": start_sigma,
+        "upscale_factor": upscale_factor,
     }
     args.output.with_suffix(".json").write_text(json.dumps(meta, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
@@ -475,12 +484,12 @@ def main():
     vae.H3Decoders.__init__ = stage(vae.H3Decoders.__init__, "decoding", "加载解码器与解码音画")
     vae.write_mp4 = stage(vae.write_mp4, "encoding", "合成 MP4 并检查音画")
 
-    clean_argv, second_pass, source_video, start_sigma = extract_pass2_args(sys.argv[1:])
+    clean_argv, second_pass, source_video, start_sigma, upscale_factor = extract_pass2_args(sys.argv[1:])
     from pika_h3.cli import parser as official_parser, main as official_main
     args = official_parser().parse_args(clean_argv)
 
     if second_pass and source_video:
-        run_pass2_refine(args, source_video=Path(source_video), start_sigma=start_sigma)
+        run_pass2_refine(args, source_video=Path(source_video), start_sigma=start_sigma, upscale_factor=upscale_factor)
     elif second_pass:
         pass1_out = args.output.with_name(args.output.stem + ".pass1.mp4")
         pass1_argv = []
@@ -496,7 +505,7 @@ def main():
         official_main()
         save_latent_cache(pass1_out, last_latents.get("video"), last_latents.get("audio"))
         try:
-            run_pass2_refine(args, source_video=pass1_out, start_sigma=start_sigma,
+            run_pass2_refine(args, source_video=pass1_out, start_sigma=start_sigma, upscale_factor=upscale_factor,
                              cached_pair=(last_latents.get("video"), last_latents.get("audio")))
         finally:
             pass1_out.unlink(missing_ok=True)

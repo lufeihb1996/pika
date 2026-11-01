@@ -207,10 +207,11 @@ class BundleTests(unittest.TestCase):
         self.assertAlmostEqual(sigmas_v[0], 0.78, places=4)
         self.assertEqual(sigmas_v[-1], 0.0)
         self.assertEqual(len(sigmas_a), 4)
-        clean, sp, src, sigma = extract_pass2_args(["--task", "ref2va", "--second-pass", "--source-video", "in.mp4", "--start-sigma", "0.78", "--output", "out.mp4"])
+        clean, sp, src, sigma, scale = extract_pass2_args(["--task", "ref2va", "--second-pass", "--source-video", "in.mp4", "--start-sigma", "0.78", "--upscale-factor", "2.25", "--output", "out.mp4"])
         self.assertTrue(sp)
         self.assertEqual(src, "in.mp4")
         self.assertAlmostEqual(sigma, 0.78)
+        self.assertAlmostEqual(scale, 2.25)
         self.assertEqual(clean, ["--task", "ref2va", "--output", "out.mp4"])
 
     def test_bundle_matches_sources_and_does_not_auto_generate(self):
