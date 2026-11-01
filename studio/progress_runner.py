@@ -440,18 +440,62 @@ def upscale_video_latent(video_external, scale=2.0):
     return video_up
 
 
+def _fast_decode_video_wrapper(fn):
+    @functools.wraps(fn)
+    def wrapped(self, latents_external, *args, **kwargs):
+        import torch
+        with torch.autocast("cuda", dtype=torch.bfloat16):
+            return fn(self, latents_external, *args, **kwargs)
+    return wrapped
+
+
+def _load_wrapper_on_gpu(base, adapter, manifest, args, token_budget):
+    import torch
+    from pika_h3.core import loader
+    from pika_h3.core.loader import apply_lora, load_lora_weights
+    from pika_h3.core.wrapper import H3DiffusionWrapper
+
+    vram_bytes = torch.cuda.get_device_properties(0).total_memory
+    use_offload = (
+        bool(getattr(args, "cpu_offload", False))
+        or (token_budget > 450000)
+        or (vram_bytes < 70 * (1024 ** 3))
+    )
+    model = loader.build_transformer(str(base), dtype=torch.bfloat16, device="cpu", subfolder=manifest["trunk"])
+    apply_lora(
+        model,
+        rank=manifest["rank"],
+        alpha=manifest["alpha"],
+        target_modules=manifest.get("target_modules"),
+        master_dtype=torch.bfloat16,
+    )
+    load_lora_weights(model, str(adapter))
+    model.requires_grad_(False).eval()
+    if use_offload:
+        model.enable_group_offload(
+            onload_device=torch.device("cuda"),
+            offload_device=torch.device("cpu"),
+            offload_type="block_level",
+            num_blocks_per_group=1,
+            use_stream=True,
+            record_stream=False,
+        )
+        wrapper = H3DiffusionWrapper(model).eval()
+    else:
+        wrapper = H3DiffusionWrapper(model).eval().to("cuda")
+    return model, wrapper
+
+
 def run_pass2_refine(args, source_video, start_sigma=0.78, upscale_factor=2.0, cached_pair=None):
     """Execute Single-Video Pass-2 full-BF16 3-step refinement."""
     from PIL import Image
     import torch
     import pika_h3.pipeline as pipeline
-    from pika_h3.core import conditioning, evaluation, geometry as G, loader, vae
+    from pika_h3.core import conditioning, evaluation, geometry as G, vae
     from pika_h3.core.conditioning import Reference, Request
-    from pika_h3.core.loader import apply_lora, load_lora_weights
     from pika_h3.core.media import decode_video_reference, preflight_reference_specs
     from pika_h3.core.numerics import configure_numerics_backend, prepare_conditioning
     from pika_h3.core.sampling import add_noise
-    from pika_h3.core.wrapper import H3DiffusionWrapper
 
     prompt = args.prompt_file.read_text(encoding="utf-8").strip() if args.prompt_file else (args.prompt or "").strip()
     preflight_reference_specs(args.ref)
@@ -461,15 +505,10 @@ def run_pass2_refine(args, source_video, start_sigma=0.78, upscale_factor=2.0, c
     policy = manifest["numerics_policy"]
     configure_numerics_backend(policy, runtime="inference")
 
-    encoder = conditioning.H3ConditionEncoder(
-        str(base),
-        device="cuda",
-        keep_loaded=True,
-        text_encoder_checkpoint=str(args.text_encoder_path) if getattr(args, "text_encoder_path", None) else None,
-    )
-
     video_low = None
     audio_low = None
+    need_vae_encode = False
+    cache_file = None
     if cached_pair is not None and cached_pair[0] is not None and cached_pair[1] is not None:
         v_raw, a_raw = cached_pair
         video_low = (v_raw if v_raw.ndim == 5 else v_raw.unsqueeze(0)).to(dtype=torch.float32).cpu()
@@ -484,16 +523,29 @@ def run_pass2_refine(args, source_video, start_sigma=0.78, upscale_factor=2.0, c
             video_low = (v_raw if v_raw.ndim == 5 else v_raw.unsqueeze(0)).to(dtype=torch.float32).cpu()
             audio_low = (a_raw if a_raw.ndim == 3 else a_raw.unsqueeze(0)).to(dtype=torch.float32).cpu()
         else:
-            emit("conditioning", "编码一采原片潜变量")
-            frames_np, _fps_in, wave_np = decode_video_reference(Path(source_video))
-            video_low = encoder.encode_video_latent(frames_np).to(dtype=torch.float32).cpu()
-            f_lat_in = int(video_low.shape[1])
-            frames_in = (f_lat_in - 2) // G.VAE_LATENTS_PER_CHUNK * G.VAE_FRAMES_PER_CHUNK + G.VAE_LATENTS_PER_CHUNK
-            target_a_in = G.audio_latent_num_frames(frames_in)
-            if wave_np is not None:
-                audio_low = encoder.encode_audio_latent(wave_np).to(dtype=torch.float32).cpu()
-            else:
-                audio_low = torch.zeros((1, target_a_in, G.AUDIO_EXTERNAL_DIM), dtype=torch.float32)
+            need_vae_encode = True
+    else:
+        raise ValueError("二采精修缺少一采原片或潜变量输入")
+
+    encoder = conditioning.H3ConditionEncoder(
+        str(base),
+        device="cuda",
+        keep_loaded=need_vae_encode,
+        text_encoder_checkpoint=str(args.text_encoder_path) if getattr(args, "text_encoder_path", None) else None,
+    )
+
+    if need_vae_encode:
+        emit("conditioning", "编码一采原片潜变量")
+        frames_np, _fps_in, wave_np = decode_video_reference(Path(source_video))
+        video_low = encoder.encode_video_latent(frames_np).to(dtype=torch.float32).cpu()
+        f_lat_in = int(video_low.shape[1])
+        frames_in = (f_lat_in - 2) // G.VAE_LATENTS_PER_CHUNK * G.VAE_FRAMES_PER_CHUNK + G.VAE_LATENTS_PER_CHUNK
+        target_a_in = G.audio_latent_num_frames(frames_in)
+        if wave_np is not None:
+            audio_low = encoder.encode_audio_latent(wave_np).to(dtype=torch.float32).cpu()
+        else:
+            audio_low = torch.zeros((1, target_a_in, G.AUDIO_EXTERNAL_DIM), dtype=torch.float32)
+        if cache_file is not None:
             try:
                 torch.save(
                     {
@@ -504,8 +556,6 @@ def run_pass2_refine(args, source_video, start_sigma=0.78, upscale_factor=2.0, c
                 )
             except Exception:
                 pass
-    else:
-        raise ValueError("二采精修缺少一采原片或潜变量输入")
 
     tier = "720p" if upscale_factor <= 1.6 else ("1K/1080p" if upscale_factor <= 2.1 else ("1.5K" if upscale_factor <= 2.35 else "2K"))
     emit("upscaling", f"二采 {tier} · 3D 潜变量 {upscale_factor:g}x 等比放大")
@@ -541,32 +591,7 @@ def run_pass2_refine(args, source_video, start_sigma=0.78, upscale_factor=2.0, c
     gc.collect()
     torch.cuda.empty_cache()
 
-    use_offload = (
-        bool(getattr(args, "cpu_offload", False))
-        or (F_lat * H_out * W_out > 220000)
-        or (torch.cuda.get_device_properties(0).total_memory < 70 * (1024 ** 3))
-    )
-    load_device = "cpu" if use_offload else "cuda"
-    model = loader.build_transformer(str(base), dtype=torch.bfloat16, device=load_device, subfolder=manifest["trunk"])
-    apply_lora(
-        model,
-        rank=manifest["rank"],
-        alpha=manifest["alpha"],
-        target_modules=manifest.get("target_modules"),
-        master_dtype=torch.bfloat16,
-    )
-    load_lora_weights(model, str(adapter))
-    model.requires_grad_(False).eval()
-    if use_offload:
-        model.enable_group_offload(
-            onload_device=torch.device("cuda"),
-            offload_device=torch.device("cpu"),
-            offload_type="block_level",
-            num_blocks_per_group=1,
-            use_stream=True,
-            record_stream=False,
-        )
-    wrapper = H3DiffusionWrapper(model).eval()
+    model, wrapper = _load_wrapper_on_gpu(base, adapter, manifest, args, F_lat * H_out * W_out)
 
     sigmas_v_list, sigmas_a_list = build_refine_ladder(start_sigma=start_sigma)
     sigmas_v = torch.tensor(sigmas_v_list, device="cuda", dtype=torch.float32)
@@ -602,7 +627,8 @@ def run_pass2_refine(args, source_video, start_sigma=0.78, upscale_factor=2.0, c
     torch.cuda.empty_cache()
 
     decoders = vae.H3Decoders(str(base), device="cuda")
-    if hasattr(decoders.vae, "enable_tiling"):
+    vram_bytes = torch.cuda.get_device_properties(0).total_memory
+    if (H_out * W_out > 8500 or vram_bytes < 70 * (1024 ** 3)) and hasattr(decoders.vae, "enable_tiling"):
         decoders.vae.enable_tiling()
     with torch.inference_mode():
         pixels = decoders.decode_video(video_refined_cpu)
@@ -629,6 +655,158 @@ def run_pass2_refine(args, source_video, start_sigma=0.78, upscale_factor=2.0, c
     args.output.with_suffix(".json").write_text(json.dumps(meta, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
 
+def run_fused_pass1_and_pass2(args, start_sigma=0.78, upscale_factor=2.0):
+    """80GB A100 fused Pass-1 + Pass-2: loads Qwen3-VL once, loads 42GB Transformer once in VRAM, skips Pass-1 VAE decode."""
+    from PIL import Image
+    import torch
+    import yaml
+    import pika_h3.pipeline as pipeline
+    from pika_h3.core import conditioning, evaluation, geometry as G, vae
+    from pika_h3.core.conditioning import Reference, Request
+    from pika_h3.core.media import preflight_reference_specs
+    from pika_h3.core.numerics import configure_numerics_backend, prepare_conditioning
+    from pika_h3.core.sampling import add_noise
+    from pika_h3.core.schedules import H3SigmaSchedule
+
+    prompt = args.prompt_file.read_text(encoding="utf-8").strip() if args.prompt_file else (args.prompt or "").strip()
+    preflight_reference_specs(args.ref)
+    references = [Reference.from_spec(spec) for spec in args.ref]
+
+    bucket_file = Path(pipeline.__file__).parent / "core" / "buckets.yaml"
+    table = yaml.safe_load(bucket_file.read_text(encoding="utf-8"))
+    tier_key = "p" + args.resolution[:-1]
+    width_1, height_1 = table["tiers"][tier_key][table["aspects"].index(args.aspect)]
+    frames = G.align_num_frames(args.duration * G.FPS)
+
+    H_in = height_1 // G.VAE_SPATIAL_FACTOR
+    W_in = width_1 // G.VAE_SPATIAL_FACTOR
+    eff_mult = float(upscale_factor)
+    if H_in * W_in > 1800:
+        eff_mult = max(1.15, min(eff_mult, math.sqrt(2040.0 / (H_in * W_in)) * eff_mult))
+    H_out = max(2, int(round(H_in * eff_mult / 2.0)) * 2)
+    W_out = max(2, int(round(W_in * eff_mult / 2.0)) * 2)
+    height_2 = H_out * G.VAE_SPATIAL_FACTOR
+    width_2 = W_out * G.VAE_SPATIAL_FACTOR
+
+    base, adapter, manifest = pipeline.resolve_assets(args)
+    policy = manifest["numerics_policy"]
+    configure_numerics_backend(policy, runtime="inference")
+
+    first_img = Image.open(args.first_image).convert("RGB") if args.first_image else None
+    last_img = Image.open(args.last_image).convert("RGB") if args.last_image else None
+    encoder = conditioning.H3ConditionEncoder(
+        str(base),
+        device="cuda",
+        keep_loaded=True,
+        text_encoder_checkpoint=str(args.text_encoder_path) if getattr(args, "text_encoder_path", None) else None,
+    )
+    req_1 = Request(
+        task=args.task, prompt=prompt, first_image=first_img, last_image=last_img,
+        references=references, height=height_1, width=width_1, num_frames=frames,
+        reference_rule="tiered", reference_short_edge=1024, keyframe_fit="crop",
+    )
+    req_2 = Request(
+        task=args.task, prompt=prompt, first_image=first_img, last_image=last_img,
+        references=references, height=height_2, width=width_2, num_frames=frames,
+        reference_rule="tiered", reference_short_edge=1024, keyframe_fit="crop",
+    )
+    cond_1 = encoder.encode(req_1)
+    cond_2 = encoder.encode(req_2)
+    encoder.free()
+    del encoder
+    gc.collect()
+    torch.cuda.empty_cache()
+
+    geom_1 = cond_1["geometry"]
+    F_lat = geom_1.num_latent_frames
+    target_a_len = geom_1.num_audio_latents
+    model, wrapper = _load_wrapper_on_gpu(base, adapter, manifest, args, F_lat * H_out * W_out)
+
+    schedule_1 = H3SigmaSchedule(
+        {"denoising_step_list": pipeline.KNOTS, "video_score_sigma_shift": 12, "audio_score_sigma_shift": 3},
+        device="cuda",
+    )
+    with torch.inference_mode():
+        video_1, audio_1 = evaluation.sample_evaluation_ladder(
+            wrapper,
+            conditional_dict=prepare_conditioning(cond_1, "cuda", policy=policy),
+            video_shape=[1, F_lat, G.VIDEO_LATENT_CHANNELS, geom_1.latent_height, geom_1.latent_width],
+            audio_shape=[1, target_a_len, G.AUDIO_EXTERNAL_DIM],
+            sigmas_v=schedule_1.video_ladder,
+            sigmas_a=schedule_1.audio_ladder,
+            seed=args.seed,
+            device="cuda",
+        )
+    video_low = video_1.detach().to(dtype=torch.float32).cpu()
+    audio_low = audio_1.detach().to(dtype=torch.float32).cpu()
+    del cond_1, video_1, audio_1
+
+    tier = "720p" if upscale_factor <= 1.6 else ("1K/1080p" if upscale_factor <= 2.1 else ("1.5K" if upscale_factor <= 2.35 else "2K"))
+    emit("upscaling", f"二采 {tier} · 3D 潜变量 {upscale_factor:g}x 等比放大（80GB 显存直通免重载）")
+    video_up = upscale_video_latent(video_low, scale=upscale_factor)
+
+    sigmas_v_list, sigmas_a_list = build_refine_ladder(start_sigma=start_sigma)
+    sigmas_v = torch.tensor(sigmas_v_list, device="cuda", dtype=torch.float32)
+    sigmas_a = torch.tensor(sigmas_a_list, device="cuda", dtype=torch.float32)
+
+    gen = torch.Generator(device="cuda").manual_seed((int(args.seed) + 1000) % (2**63 - 1))
+    v_clean = video_up.to(device="cuda", dtype=torch.float32)
+    a_clean = audio_low.to(device="cuda", dtype=torch.float32)
+    eps_v = torch.randn(v_clean.shape, device="cuda", dtype=torch.float32, generator=gen)
+    eps_a = torch.randn(a_clean.shape, device="cuda", dtype=torch.float32, generator=gen)
+    noisy_video = add_noise(v_clean, eps_v, sigmas_v[0])
+    noisy_audio = add_noise(a_clean, eps_a, sigmas_a[0])
+    del v_clean, a_clean, eps_v, eps_a, video_up
+
+    with torch.inference_mode():
+        video_refined, _ = evaluation.sample_evaluation_ladder(
+            wrapper,
+            conditional_dict=prepare_conditioning(cond_2, "cuda", policy=policy),
+            video_shape=[1, F_lat, G.VIDEO_LATENT_CHANNELS, H_out, W_out],
+            audio_shape=[1, target_a_len, G.AUDIO_EXTERNAL_DIM],
+            sigmas_v=sigmas_v,
+            sigmas_a=sigmas_a,
+            seed=args.seed,
+            device="cuda",
+            noise=(noisy_video, noisy_audio),
+        )
+    video_refined_cpu = video_refined[0].cpu()
+    audio_clean_cpu = audio_low[0].cpu()
+    torch.cuda.synchronize()
+
+    del wrapper, model, cond_2, noisy_video, noisy_audio
+    gc.collect()
+    torch.cuda.empty_cache()
+
+    decoders = vae.H3Decoders(str(base), device="cuda")
+    vram_bytes = torch.cuda.get_device_properties(0).total_memory
+    if (H_out * W_out > 8500 or vram_bytes < 70 * (1024 ** 3)) and hasattr(decoders.vae, "enable_tiling"):
+        decoders.vae.enable_tiling()
+    with torch.inference_mode():
+        pixels = decoders.decode_video(video_refined_cpu)
+        wave = decoders.decode_audio(audio_clean_cpu)
+    del decoders
+    gc.collect()
+    torch.cuda.empty_cache()
+
+    wave = wave[:, :round(frames / G.FPS * G.AUDIO_SAMPLE_RATE)]
+    args.output.parent.mkdir(parents=True, exist_ok=True)
+    vae.write_mp4(str(args.output), pixels, audio=wave)
+    save_latent_cache(args.output, video_refined_cpu, audio_clean_cpu)
+    meta = {
+        "task": args.task,
+        "prompt": prompt,
+        "resolution": f"{width_2}x{height_2}",
+        "duration": round(frames / G.FPS, 2),
+        "frames": frames,
+        "seed": args.seed,
+        "second_pass": True,
+        "start_sigma": start_sigma,
+        "upscale_factor": upscale_factor,
+    }
+    args.output.with_suffix(".json").write_text(json.dumps(meta, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+
 def main():
     emit("starting", "初始化官方推理程序")
     import torch
@@ -644,6 +822,7 @@ def main():
     loader.build_transformer = stage(loader.build_transformer, "loading", "加载主模型与适配器")
     evaluation.sample_evaluation_ladder = sampling_observer(evaluation.sample_evaluation_ladder, torch.cuda.synchronize, capture=last_latents)
     vae.H3Decoders.__init__ = stage(vae.H3Decoders.__init__, "decoding", "加载解码器与解码音画")
+    vae.H3Decoders.decode_video = _fast_decode_video_wrapper(vae.H3Decoders.decode_video)
     vae.write_mp4 = stage(vae.write_mp4, "encoding", "合成 MP4 并检查音画")
 
     clean_argv, second_pass, source_video, start_sigma, upscale_factor = extract_pass2_args(sys.argv[1:])
@@ -653,25 +832,7 @@ def main():
     if second_pass and source_video:
         run_pass2_refine(args, source_video=Path(source_video), start_sigma=start_sigma, upscale_factor=upscale_factor)
     elif second_pass:
-        pass1_out = args.output.with_name(args.output.stem + ".pass1.mp4")
-        pass1_argv = []
-        i = 0
-        while i < len(clean_argv):
-            if clean_argv[i] == "--output" and i + 1 < len(clean_argv):
-                pass1_argv.extend(["--output", str(pass1_out)])
-                i += 2
-            else:
-                pass1_argv.append(clean_argv[i])
-                i += 1
-        sys.argv = [sys.argv[0]] + pass1_argv
-        official_main()
-        save_latent_cache(pass1_out, last_latents.get("video"), last_latents.get("audio"))
-        try:
-            run_pass2_refine(args, source_video=pass1_out, start_sigma=start_sigma, upscale_factor=upscale_factor,
-                             cached_pair=(last_latents.get("video"), last_latents.get("audio")))
-        finally:
-            pass1_out.unlink(missing_ok=True)
-            pass1_out.with_suffix(".json").unlink(missing_ok=True)
+        run_fused_pass1_and_pass2(args, start_sigma=start_sigma, upscale_factor=upscale_factor)
     else:
         sys.argv = [sys.argv[0]] + clean_argv
         official_main()
