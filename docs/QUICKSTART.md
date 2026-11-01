@@ -53,7 +53,7 @@ exec(urllib.request.urlopen(
 挂 Google Drive                 第一次会弹授权
 恢复环境                        Drive 有备份就解压
 拉代码                         git clone
-下模型 146.8 GB                没有就下，30~40 分钟
+下 REF 模型约 147 GB           已有文件复用，中断后重跑补齐
 起 server + 隧道
 ```
 
@@ -81,12 +81,38 @@ exec(urllib.request.urlopen(
 
 右侧面板：
 
-1. 模式 **T2VA**
+1. 模式 **REF2VA**，上传至少一张图片或一个视频参考
 2. 分辨率 **480p**、时长 **5 秒**
-3. 提示词（三段式，见下）
+3. 提示词（REF2VA 六段式，见下）
 4. 点「加入队列」
 
+默认只下载 REF 主模型、REF 适配器和共用组件。已有普通版完整缓存时，新增 REF 约 69 GB；不清理旧文件。若选择 T2VA / I2VA / L2VA / FL2VA，官方程序会按需另下载普通主模型与 FL2VA 适配器，约 69 GB。
+
 ### 提示词格式
+
+REF2VA 使用六段结构，参考图按上传顺序对应 `<Picture 1>` 等标签：
+
+```text
+subject_definitions:
+...
+
+summary:
+...
+
+retention_analysis:
+...
+
+detailed_description:
+[Shot 1] ...
+
+overall_soundscape:
+...
+
+non_diegetic_music:
+...
+```
+
+文生 / 首尾帧模式使用三段式：
 
 ```
 integrated_multimodal_description:

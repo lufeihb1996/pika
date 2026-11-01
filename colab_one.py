@@ -7,9 +7,9 @@ Colab 里只需要跑这一行：
         "https://raw.githubusercontent.com/lufeihb1996/pika/main/colab_one.py",
         timeout=60).read().decode("utf-8"))
 
-启动器本身不下载模型（怕没确认就吃掉 141 GiB），这里补上：模型已存在就跳过。
+默认只预下载 REF2VA 多参考所需权重和共用组件，约 147 GB。
+每次检查完整文件清单，已下载的文件由 Hugging Face 缓存复用。
 """
-import glob
 import os
 import pathlib
 import shutil
@@ -71,16 +71,21 @@ def sync_code():
         subprocess.run([sys.executable, "build_colab.py"], cwd=str(SRC), check=True)
 
 
-def model_ready():
-    return bool(glob.glob(
-        f"{WORK}/hf/hub/models--{BASE_REPO.replace('/', '--')}/snapshots/*/transformer/*.safetensors"))
+def ensure_download_environment():
+    if pathlib.Path(PY).is_file():
+        return
+    # A fresh session may have no Drive backup. Install before using venv Python.
+    print("没有可复用的 Python 环境，先安装官方环境...", flush=True)
+    installer = SRC / "installer_runtime.py"
+    namespace = {"__name__": "pika_installer", "__file__": str(installer)}
+    exec(compile(installer.read_text(encoding="utf-8"), str(installer), "exec"), namespace)
+    namespace["CONFIG"] = dict(namespace["CONFIG"], storage_root=str(pathlib.Path(WORK).parent))
+    namespace["prepare_environment"]()
 
 
 def prefetch_models():
-    if model_ready():
-        print("模型已在本地，跳过下载")
-        return
-    print("下载模型约 141 GiB，30~40 分钟，别关页面...", flush=True)
+    print("检查 / 补齐 REF2VA 模型：全新下载约 147 GB；已有共用组件时约补 69 GB。", flush=True)
+    print("已缓存的文件会复用，中断后可重跑；不预下载普通 transformer / fl2va。", flush=True)
     env = dict(os.environ,
                HF_HOME=f"{WORK}/hf", HF_HUB_CACHE=f"{WORK}/hf/hub",
                HF_XET_CACHE=f"{WORK}/hf/xet")
@@ -94,12 +99,13 @@ def prefetch_models():
     code = f'''
 from huggingface_hub import snapshot_download
 snapshot_download("Pika-Labs/Pika-H3-Flex", revision="{ADAPTER_REV}",
-                  allow_patterns=["fl2va/*", "LICENSE", "NOTICE", "licenses/*"])
+                  allow_patterns=["ref2va/*", "LICENSE", "NOTICE", "licenses/*"])
 snapshot_download("{BASE_REPO}", revision="{BASE_REV}",
-                  allow_patterns=["transformer/*", "text_encoder/*", "tokenizer/*",
+                  allow_patterns=["transformer_ref/*", "text_encoder/*", "tokenizer/*",
                                   "processor/*", "vae/*", "audio_vae/*", "*.json",
                                   "LICENSE", "NOTICE", "licenses/*"])
-print("模型下载完成", flush=True)
+print("REF2VA 模型准备完成。网页请选择 REF2VA 多参考，并上传图片或视频参考。", flush=True)
+print("其他四种模式仍可用，但首次生成会另行下载普通权重约 69 GB。", flush=True)
 '''
     subprocess.run([PY, "-c", code], env=env, check=True)
 
@@ -110,13 +116,19 @@ def launch():
          {"__name__": "__main__", "__file__": str(LAUNCHER)})
 
 
-step("挂载 Google Drive")
-mount_drive()
-step("恢复运行环境")
-restore_env()
-step("同步代码")
-sync_code()
-step("准备模型")
-prefetch_models()
-step("启动工作台")
-launch()
+def main():
+    step("挂载 Google Drive")
+    mount_drive()
+    step("恢复运行环境")
+    restore_env()
+    step("同步代码")
+    sync_code()
+    ensure_download_environment()
+    step("准备 REF2VA 模型")
+    prefetch_models()
+    step("启动工作台")
+    launch()
+
+
+if __name__ == "__main__":
+    main()
