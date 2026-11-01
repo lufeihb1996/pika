@@ -1,5 +1,6 @@
 """Install the isolated, headless INT8 refiner. No server or generation is started."""
 import argparse
+from contextlib import contextmanager
 import hashlib
 import json
 import os
@@ -15,6 +16,7 @@ COMFY_REV = "b1a247c9cf9dbfda4b2c0a0c1d50950667eeaa0c"
 REGEN_REV = "9b686c5ffd380e9d1351f9b8beef6d20d703ca3e"
 UPSCALE_REV = "40316cf008b2fd8663263270669eb4da23f89d2c"
 TABLE_SHA = "c02a6c11888297688c1e6278185ea1f947023acfc69f9003bbcdcec9a229a8e7"
+CUDA_WHEELS = ("torch==2.11.0+cu130", "torchvision==0.26.0+cu130", "torchaudio==2.11.0+cu130")
 MODELS = [
     ("Comfy-Org/MiniMax-H3", "diffusion_models/minimax_h3_fl2va_pruned_int8_convrot.safetensors", "diffusion_models"),
     ("Comfy-Org/MiniMax-H3", "text_encoders/qwen3vl_32b_minimax_h3_int8_convrot.safetensors", "text_encoders"),
@@ -102,8 +104,47 @@ def ensure_venv(root):
     return python
 
 
+def probe_torch(python):
+    result = subprocess.run([str(python), "-c",
+        "import torch,json; print(json.dumps({'torch':str(torch.__version__),'cuda':torch.version.cuda}))"],
+        capture_output=True, text=True, check=True)
+    return json.loads(result.stdout)
+
+
+def ensure_cuda_torch(python):
+    info = probe_torch(python)
+    if int((info.get("cuda") or "0").split(".")[0]) < 13:
+        print(f"精修环境 CUDA {info.get('cuda')} 会禁用 Kitchen CUDA 优化；安装独立 cu130 wheels。", flush=True)
+        wheelhouse = Path(python).parent.parent.parent / "cu130-wheels"
+        cached = ("--find-links", str(wheelhouse)) if wheelhouse.is_dir() else ()
+        run(python, "-m", "pip", "install", "--no-cache-dir", "--index-url",
+            "https://download.pytorch.org/whl/cu130", *cached, *CUDA_WHEELS)
+        info = probe_torch(python)
+    if int((info.get("cuda") or "0").split(".")[0]) < 13:
+        raise RuntimeError("OpenH3 requires a CUDA 13+ PyTorch build for Kitchen acceleration")
+    print(f"OpenH3 PyTorch {info['torch']} / CUDA {info['cuda']}", flush=True)
+    return info
+
+
+@contextmanager
+def setup_lock(root):
+    # Serialize manual preparation and a newly submitted job's preparation.
+    import fcntl
+    with (root / "setup.lock").open("a") as lock:
+        fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+
+
 def prepare(root):
     root.mkdir(parents=True, exist_ok=True)
+    with setup_lock(root):
+        return _prepare_locked(root)
+
+
+def _prepare_locked(root):
     python = ensure_venv(root)
     comfy = root / "engine"
     marker = root / "ready.json"
@@ -117,9 +158,10 @@ def prepare(root):
             requirements = directory / "requirements.txt"
             if requirements.is_file():
                 run(python, "-m", "pip", "install", "-r", requirements)
+        torch_info = ensure_cuda_torch(python)
         # Run downloads with the refiner's dependencies, not the launcher's environment.
         run(python, Path(__file__), "--root", root, "--models-only")
-        marker.write_text(json.dumps({"fingerprint": fingerprint}), encoding="utf-8")
+        marker.write_text(json.dumps({"fingerprint": fingerprint, **torch_info}), encoding="utf-8")
     return python, comfy
 
 

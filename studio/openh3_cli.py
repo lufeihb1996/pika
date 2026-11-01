@@ -89,6 +89,8 @@ def refine(args):
     import asyncio
     import numpy as np
     import torch
+    if int((torch.version.cuda or "0").split(".")[0]) < 13:
+        raise RuntimeError("OpenH3 精修需要 CUDA 13+ PyTorch；请重跑新版 setup，避免 Kitchen CUDA 优化被禁用")
     import comfy_kitchen as kitchen
     if kitchen.int8_attention_is_available():
         sys.argv += ["--use-ck-attention", "--fast", "fp16_accumulation"]

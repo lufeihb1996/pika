@@ -17,6 +17,11 @@ HTTP 服务、网页或第二个隧道，但精修依赖固定版本的 ComfyUI 
 模型从 Hugging Face 检查 / 下载，不从云盘复制 B15 模型。精修环境会补齐缺失的
 `python3.12-venv`，并修复创建到一半的虚拟环境；沿用现有 Pika CUDA 包，新增依赖安装到精修环境。
 
+精修单独安装 `torch 2.11.0+cu130` 及匹配的 torchvision / torchaudio；Pika 原环境保持不变。
+固定版 ComfyUI 的 `quant_ops.py` 会在 CUDA <13 时禁用 Kitchen CUDA 后端，因此不能直接
+沿用 Pika 的 cu129 Torch 做高效 INT8 精修。启动器会检查并补齐，CLI 也会拒绝静默使用旧构建。
+这保证优化后端可启用，不代表已经完成相同片段的速度或画质对照。
+
 后端请求示例字段：
 
 ```json

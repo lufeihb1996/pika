@@ -16,6 +16,26 @@ spec.loader.exec_module(launcher)
 
 
 class SetupTests(unittest.TestCase):
+    def test_cuda_129_is_upgraded_only_in_refiner_environment(self):
+        python = Path("/refiner/venv/bin/python")
+        with patch.object(setup, "probe_torch", side_effect=[{"torch":"2.13.0+cu129","cuda":"12.9"}, {"torch":"2.13.0+cu130","cuda":"13.0"}]), patch.object(setup, "run") as run:
+            setup.ensure_cuda_torch(python)
+        self.assertEqual(run.call_count, 1)
+        self.assertEqual(run.call_args.args[0], python)
+        self.assertIn("https://download.pytorch.org/whl/cu130", run.call_args.args)
+        for wheel in setup.CUDA_WHEELS:
+            self.assertIn(wheel, run.call_args.args)
+
+    def test_cuda_130_is_reused(self):
+        with patch.object(setup, "probe_torch", return_value={"torch":"2.13.0+cu130","cuda":"13.0"}), patch.object(setup, "run") as run:
+            setup.ensure_cuda_torch(Path("/refiner/python"))
+        run.assert_not_called()
+
+    def test_upgrade_cannot_silently_keep_a_fallback_build(self):
+        with patch.object(setup, "probe_torch", return_value={"torch":"2.13.0+cu129","cuda":"12.9"}), patch.object(setup, "run"):
+            with self.assertRaisesRegex(RuntimeError, "CUDA 13"):
+                setup.ensure_cuda_torch(Path("/refiner/python"))
+
     def test_partial_venv_is_repaired_and_missing_ensurepip_installed(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
