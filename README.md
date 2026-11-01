@@ -49,8 +49,6 @@ exec(urllib.request.urlopen(
 
 `colab_one.py` 默认准备 **REF2VA + FL2VA 两套权重**：`transformer_ref/`、`ref2va/`、`transformer/`、`fl2va/` 和一份共用编码器/VAE，合计约 **216 GB**。已有任一完整套装时，只需补另一套约 **69 GB**；已有文件会复用，中断后重跑会补齐，不会删除旧模型。支持全部五种模式：REF2VA 多参考、T2VA 文生、I2VA 首帧、L2VA 尾帧、FL2VA 首尾帧。
 
-还会下载独立的 **MOSS 生图三件套约 15.50 GB**：SFT INT8 主模型、Qwen3.5-9B INT8 文本编码器、FLUX.2 VAE，与原三合一脚本的生图权重相同。默认保存在 scratch 的 `Pika_H3_Flex_Official/comfy-models/`，按 ComfyUI 的 `diffusion_models/`、`text_encoders/`、`vae/` 分类，不替换 Pika 模型或 PyTorch。**这一项只下载权重，不启动 ComfyUI，也不会让生图接口自动上线。** 独立下载入口和目录设置见 [快速手册](docs/QUICKSTART.md#moss-独立下载)。
-
 ---
 
 ## 文档
@@ -88,15 +86,13 @@ exec(urllib.request.urlopen(
 | `vercel-web/` | 可单独部署的静态前端 |
 | `dist/` | 打包好的 Colab 启动器（单文件） |
 | `colab_one.py` | Colab 一键启动（恢复环境 → 拉代码 → 下模型 → 启动） |
-| `colab_moss.py` | 独立下载 MOSS 生图三件套，不启动推理服务 |
-| `tests/` | 离线单元测试 |
+| `tests/` | 19 项单元测试 |
 
 ---
 
 ## 已知代价
 
 - **默认两套模型约 216 GB**，新 Colab 会话若丢失本地缓存，需要重新下载；耗时取决于带宽。环境可以用 Google Drive 备份恢复。
-- **MOSS 另占约 15.50 GB**；只跑视频时可在执行一键启动前设置 `os.environ["PIKA_DOWNLOAD_MOSS"] = "0"`。
 - **每条任务重新加载模型**（编码器 62 GB + 主模型 66 GB），显存装不下三个组件同时驻留，这是硬约束。
 - **768p 长视频可能 OOM**：已去掉 CPU 卸载选项，显存不够时只能降分辨率或缩短时长。
 
