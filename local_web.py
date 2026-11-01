@@ -171,8 +171,6 @@ class Handler(SimpleHTTPRequestHandler):
                 if not block:raise ConnectionError('upload interrupted')
                 conn.send(block);left-=len(block)
             response=conn.getresponse()
-            capture=urlsplit(self.path).path=='/api/jobs' and response.status in {200,201}
-            chunks=[]
             self.send_response(response.status)
             for k,v in response.getheaders():
                 if k.lower() in HOP:continue
@@ -180,16 +178,11 @@ class Handler(SimpleHTTPRequestHandler):
                 self.send_header(k,v)
             self.send_header('Connection','close')
             self.end_headers();sent=True;self.close_connection=True
+            # 纯转发：状态合并只由 local_media 的后台线程做，代理不能有副作用。
             while True:
                 block=response.read1(64*1024)
                 if not block:break
-                if capture:chunks.append(block)
                 self.wfile.write(block)
-            if capture:
-                payload=json.loads(b''.join(chunks))
-                for job in payload.get('jobs',[]) if 'jobs' in payload else [payload]:
-                    self.downloads.upsert(job)
-                self.downloads.wake.set()
         except (OSError,http.client.HTTPException,ValueError):
             if not sent:
                 self.json({'error':'无法连接 Colab，请检查后端和隧道'},502)

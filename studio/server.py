@@ -112,9 +112,18 @@ class Studio:
             cleaned.append({"kind": kind, "id": ref["id"]})
         if counts["image"] > 9 or counts["video"] > 3 or counts["audio"] > 3 or (refs and not counts["image"] + counts["video"]):
             raise ValueError("最多 9 图 / 3 视频 / 3 音频，共 12 个；至少一张图片或一个视频")
+        source_video = data.get("source_video") or ""
+        if source_video:
+            self.upload_path(source_video, "video")
+        second_pass = bool(data.get("second_pass", False)) or bool(source_video)
+        raw_sigma = data.get("start_sigma", 0.78)
+        if type(raw_sigma) is bool or not isinstance(raw_sigma, (int, float)) or not 0.1 <= float(raw_sigma) <= 0.99:
+            raise ValueError("二采重噪强度 start_sigma 需在 0.1–0.99 之间")
+        start_sigma = round(float(raw_sigma), 4)
         return dict(prompt=prompt.strip(), task=task, resolution=res, duration=duration,
                     aspect=aspect, seed=seed, cpu_offload=offload, first_image=first,
-                    last_image=last, references=cleaned)
+                    last_image=last, references=cleaned, source_video=source_video,
+                    second_pass=second_pass, start_sigma=start_sigma)
 
     def submit(self, data):
         if self.preview or not self.cli.is_file():
@@ -159,6 +168,10 @@ class Studio:
                 cmd.extend([flag, str(self.upload_path(p[key], "image"))])
         for ref in p["references"]:
             cmd.extend(["--ref", ref["kind"] + ":" + str(self.upload_path(ref["id"], ref["kind"]))])
+        if p.get("source_video"):
+            cmd.extend(["--source-video", str(self.upload_path(p["source_video"], "video"))])
+        if p.get("second_pass") or p.get("source_video"):
+            cmd.extend(["--second-pass", "--start-sigma", str(p.get("start_sigma", 0.78))])
         return cmd
 
     def cancel(self, job_id):

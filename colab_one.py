@@ -7,7 +7,7 @@ Colab 里只需要跑这一行：
         "https://raw.githubusercontent.com/lufeihb1996/pika/main/colab_one.py",
         timeout=60).read().decode("utf-8"))
 
-默认预下载 REF2VA、FL2VA 两套权重和共用组件，约 216 GB，支持全部五种模式。
+默认预下载 REF2VA、FL2VA 两套权重和共用组件，约 216 GB，支持全部五种模式与 1080p 二采精修。
 每次检查完整文件清单，已下载的文件由 Hugging Face 缓存复用。
 """
 import os
@@ -26,6 +26,8 @@ LAUNCHER = SRC / "dist" / "00_Colab_官方工作台_一键启动.py"
 ADAPTER_REV = "0ddf55ad7067ca1e76812253bd7b4600df87f759"
 BASE_REPO = "MiniMaxAI/MiniMax-H3"
 BASE_REV = "42ed227ee7df40d41602854ae760620d6eb651fe"
+UPSCALER_REPO = "LBH-123-AI/Minimax_h3_latent_Upscaler"
+UPSCALER_REV = "3f941d5d182014dd5c0a5e16330420ee2d4aa0c6"
 
 
 def step(title):
@@ -104,7 +106,9 @@ snapshot_download("{BASE_REPO}", revision="{BASE_REV}",
                   allow_patterns=["transformer_ref/*", "transformer/*", "text_encoder/*", "tokenizer/*",
                                   "processor/*", "vae/*", "audio_vae/*", "*.json",
                                   "LICENSE", "NOTICE", "licenses/*"])
-print("两套模型准备完成：REF2VA 多参考；T2VA 文生；I2VA 首帧；L2VA 尾帧；FL2VA 首尾帧。", flush=True)
+snapshot_download("{UPSCALER_REPO}", revision="{UPSCALER_REV}",
+                  allow_patterns=["minimax_h3_latent_upscaler_3d_conv_v1/*"])
+print("两套模型 + 3D 潜变量二采超分权重准备完成：REF2VA 多参考；T2VA 文生；I2VA 首帧；L2VA 尾帧；FL2VA 首尾帧；支持 1080p 二采精修。", flush=True)
 '''
     subprocess.run([PY, "-c", code], env=env, check=True)
 

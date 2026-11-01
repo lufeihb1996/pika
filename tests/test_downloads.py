@@ -104,6 +104,25 @@ class DownloadTests(unittest.TestCase):
             self.assertEqual(self.requests,[])
         finally:server.shutdown();server.server_close()
 
+    def test_jobs_proxy_is_pure_passthrough(self):
+        # 代理只转发；状态合并由 local_media 的后台线程独占，代理不能再有 upsert 之类的副作用。
+        import local_web,urllib.request
+        self.jobs=[dict(id='5'*32,version=1,status='running')]
+        self.manager=Downloads(self.url,self.root,interval=100,retry_delays=(0,))
+        failures=[]
+        class Server(ThreadingHTTPServer):
+            def handle_error(self,request,client_address):
+                failures.append(sys.exc_info()[1])
+        server=Server(('127.0.0.1',0),local_web.Handler)
+        server.upstream=self.url;server.downloads=self.manager
+        threading.Thread(target=server.serve_forever,daemon=True).start()
+        try:
+            body=urllib.request.urlopen(f'http://127.0.0.1:{server.server_port}/api/jobs',timeout=5).read()
+            self.assertEqual(json.loads(body),{'jobs':self.jobs})
+            self.assertEqual(failures,[])
+            self.assertFalse(self.manager.jobs)
+        finally:server.shutdown();server.server_close()
+
     def test_shot_create_edit_delete_and_persistence(self):
         # 这个用例只测增删改，不需要轮询；interval 放大避免 monitor 把 running 标成中断。
         self.manager=Downloads(self.url,self.root,interval=100,retry_delays=(0,))

@@ -62,8 +62,8 @@ class ColabDownloadTests(unittest.TestCase):
         hf.snapshot_download = lambda repo, **kw: downloads.append((repo, kw))
         with patch.dict(sys.modules, {"huggingface_hub": hf}), contextlib.redirect_stdout(io.StringIO()):
             exec(compile(command[2], "download-payload", "exec"), {})
-        self.assertEqual(len(downloads), 2)
-        adapter, base = downloads
+        self.assertEqual(len(downloads), 3)
+        adapter, base, upscaler = downloads
         self.assertEqual(adapter[0], "Pika-Labs/Pika-H3-Flex")
         self.assertEqual(adapter[1]["revision"], colab.ADAPTER_REV)
         self.assertIn("ref2va/*", adapter[1]["allow_patterns"])
@@ -73,6 +73,9 @@ class ColabDownloadTests(unittest.TestCase):
         patterns = base[1]["allow_patterns"]
         for folder in ("transformer_ref", "transformer", "text_encoder", "tokenizer", "processor", "vae", "audio_vae"):
             self.assertEqual(patterns.count(folder + "/*"), 1)
+        self.assertEqual(upscaler[0], colab.UPSCALER_REPO)
+        self.assertEqual(upscaler[1]["revision"], colab.UPSCALER_REV)
+        self.assertIn("minimax_h3_latent_upscaler_3d_conv_v1/*", upscaler[1]["allow_patterns"])
         self.assertEqual(command[:2], [colab.PY, "-c"])
         self.assertTrue(call.kwargs["check"])
 

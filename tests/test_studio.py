@@ -19,7 +19,7 @@ from unittest.mock import patch
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "studio"))
 from server import Studio, Handler, ThreadingHTTPServer
-from progress_runner import sampling_observer
+from progress_runner import sampling_observer, build_refine_ladder, extract_pass2_args
 
 
 class StudioTests(unittest.TestCase):
@@ -96,9 +96,18 @@ class StudioTests(unittest.TestCase):
         self.assertEqual(upload["kind"], "image")
         params = self.app.validate({"prompt":"test", "task":"i2va", "first_image":upload["id"]})
         self.assertEqual(params["task"], "i2va")
-        for invalid in ({"task":[]}, {"duration":16}, {"seed": True}, {"first_image":"../../outside"}, {"task":"ref2va","references":[]}):
+        for invalid in ({"task":[]}, {"duration":16}, {"seed": True}, {"first_image":"../../outside"}, {"task":"ref2va","references":[]}, {"start_sigma": 1.2}):
             with self.assertRaises(ValueError):
                 self.app.validate({"prompt":"test", **invalid})
+        vid = json.load(self.request("/api/uploads?name=pass1.mp4", b"test-video", {"Content-Type":"application/octet-stream"}))
+        self.assertEqual(vid["kind"], "video")
+        p2 = self.app.validate({"prompt":"<Picture 1> refine", "task":"ref2va", "references":[{"kind":"image","id":upload["id"]}], "source_video":vid["id"], "second_pass":True, "start_sigma":0.78})
+        self.assertTrue(p2["second_pass"])
+        self.assertEqual(p2["source_video"], vid["id"])
+        cmd = Studio.command(self.app, {"id": "b"*32, "version": 2, "params": p2})
+        self.assertIn("--second-pass", cmd)
+        self.assertIn("--source-video", cmd)
+        self.assertIn("--start-sigma", cmd)
 
     def test_cancel_running_and_queued(self):
         self.app.command = lambda j: [sys.executable, str(self.fake), str(self.app.output_path(j)), "30"]
@@ -193,6 +202,16 @@ class BundleTests(unittest.TestCase):
         self.assertEqual(emit.call_args.kwargs['completed'],6)
         self.assertEqual(emit.call_args.kwargs['total'],6)
         self.assertIsNone(g.hook)
+        sigmas_v, sigmas_a = build_refine_ladder(0.78)
+        self.assertEqual(len(sigmas_v), 4)
+        self.assertAlmostEqual(sigmas_v[0], 0.78, places=4)
+        self.assertEqual(sigmas_v[-1], 0.0)
+        self.assertEqual(len(sigmas_a), 4)
+        clean, sp, src, sigma = extract_pass2_args(["--task", "ref2va", "--second-pass", "--source-video", "in.mp4", "--start-sigma", "0.78", "--output", "out.mp4"])
+        self.assertTrue(sp)
+        self.assertEqual(src, "in.mp4")
+        self.assertAlmostEqual(sigma, 0.78)
+        self.assertEqual(clean, ["--task", "ref2va", "--output", "out.mp4"])
 
     def test_bundle_matches_sources_and_does_not_auto_generate(self):
         target = next((ROOT / "dist").glob("*.py"))
