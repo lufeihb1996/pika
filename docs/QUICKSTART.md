@@ -53,7 +53,7 @@ exec(urllib.request.urlopen(
 挂 Google Drive                 第一次会弹授权
 恢复环境                        Drive 有备份就解压
 拉代码                         git clone
-下 REF 模型约 147 GB           已有文件复用，中断后重跑补齐
+下 REF + FL2VA 共约 216 GB     共用组件只下一份，已有文件复用，中断后重跑补齐
 起 server + 隧道
 ```
 
@@ -62,8 +62,8 @@ exec(urllib.request.urlopen(
 | 你的状态 | 总耗时 |
 |---|---|
 | 会话还在、模型已下 | 20 秒 |
-| 会话没了、Drive 有环境备份 | 35~50 分钟（主要在下模型） |
-| 会话没了、Drive 也没备份 | 40~55 分钟 |
+| 会话没了、Drive 有环境备份 | 环境恢复 + 两套模型约 216 GB 下载，耗时随带宽变化 |
+| 会话没了、Drive 也没备份 | 额外安装环境，再下载两套模型 |
 
 ### 成功的标志
 
@@ -86,7 +86,7 @@ exec(urllib.request.urlopen(
 3. 提示词（REF2VA 六段式，见下）
 4. 点「加入队列」
 
-默认只下载 REF 主模型、REF 适配器和共用组件。已有普通版完整缓存时，新增 REF 约 69 GB；不清理旧文件。若选择 T2VA / I2VA / L2VA / FL2VA，官方程序会按需另下载普通主模型与 FL2VA 适配器，约 69 GB。
+默认下载 REF 与普通主模型、两种适配器和一份共用组件，合计约 216 GB，五种模式全部准备。已有 REF 或普通版完整缓存时，只需补另一套约 69 GB；不清理旧文件。REF2VA 用于多参考生成，I2VA 用于首帧接续，FL2VA 用于首尾帧引导，T2VA 用于纯文字生成，L2VA 用于尾帧引导。
 
 ### 提示词格式
 
@@ -204,6 +204,6 @@ git add -A && git commit -m "..." && git push
 
 ## 成本提醒
 
-- Colab 免费/Pro 的会话会被回收，`/mnt/local-scratch` 清空 → 模型 146.8 GB 要重下。
+- Colab 免费/Pro 的会话会被回收，`/mnt/local-scratch` 清空 → 默认两套模型约 216 GB 要重下。
 - 环境（venv + 源码）可以备份到 Google Drive 省 4 分钟，见 [ARCHITECTURE.md](ARCHITECTURE.md#环境备份)。
 - 默认无密码，隧道域名固定——测试阶段别外传域名。

@@ -145,7 +145,7 @@ shot_id  role('first'|'last'|'reference'|'editor_*')  position  kind  upload_id
 
 ## 6. 模型构成
 
-最小可用集 **146.8 GB**（13 个大文件）：
+`colab_one.py` 默认准备 REF2VA 与 FL2VA 两套权重，合计约 **216 GB**，编码器和 VAE 共用一份。普通版单套约 **146.8 GB**，组成如下：
 
 | 组件 | 文件数 | 大小 | 来源 |
 |---|---|---|---|
@@ -156,13 +156,13 @@ shot_id  role('first'|'last'|'reference'|'editor_*')  position  kind  upload_id
 | `fl2va/adapter.safetensors` | 1 | 2.77 GB | **Pika 后训练** |
 | tokenizer / processor / 配置 | 若干 | ~0.02 GB | — |
 
-**没下的**（按需触发）：
+**额外组件**：
 
 | 组件 | 大小 | 什么时候下 |
 |---|---|---|
-| `transformer_ref/` | 66.28 GB | 第一次用 REF2VA |
-| `ref2va/adapter.safetensors` | 2.77 GB | 同上 |
-| `comfy/loras/` | 3.64 GB | 只有 ComfyUI 用 |
+| `transformer_ref/` | 66.28 GB | 启动格默认预下载 |
+| `ref2va/adapter.safetensors` | 2.77 GB | 启动格默认预下载 |
+| `comfy/loras/` | 3.64 GB | 不预下载，只有 ComfyUI 用 |
 
 ### 精度
 

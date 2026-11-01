@@ -54,7 +54,7 @@ class ColabDownloadTests(unittest.TestCase):
         run.assert_called_once()
         return run.call_args
 
-    def test_ref_only_payload_uses_pinned_versions_and_shared_components(self):
+    def test_both_tasks_use_pinned_versions_and_shared_components_once(self):
         call = self.downloader_call()
         command = call.args[0]
         downloads = []
@@ -67,13 +67,12 @@ class ColabDownloadTests(unittest.TestCase):
         self.assertEqual(adapter[0], "Pika-Labs/Pika-H3-Flex")
         self.assertEqual(adapter[1]["revision"], colab.ADAPTER_REV)
         self.assertIn("ref2va/*", adapter[1]["allow_patterns"])
-        self.assertNotIn("fl2va/*", adapter[1]["allow_patterns"])
+        self.assertIn("fl2va/*", adapter[1]["allow_patterns"])
         self.assertEqual(base[0], colab.BASE_REPO)
         self.assertEqual(base[1]["revision"], colab.BASE_REV)
         patterns = base[1]["allow_patterns"]
-        self.assertNotIn("transformer/*", patterns)
-        for folder in ("transformer_ref", "text_encoder", "tokenizer", "processor", "vae", "audio_vae"):
-            self.assertIn(folder + "/*", patterns)
+        for folder in ("transformer_ref", "transformer", "text_encoder", "tokenizer", "processor", "vae", "audio_vae"):
+            self.assertEqual(patterns.count(folder + "/*"), 1)
         self.assertEqual(command[:2], [colab.PY, "-c"])
         self.assertTrue(call.kwargs["check"])
 

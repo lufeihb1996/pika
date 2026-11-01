@@ -7,7 +7,7 @@ Colab 里只需要跑这一行：
         "https://raw.githubusercontent.com/lufeihb1996/pika/main/colab_one.py",
         timeout=60).read().decode("utf-8"))
 
-默认只预下载 REF2VA 多参考所需权重和共用组件，约 147 GB。
+默认预下载 REF2VA、FL2VA 两套权重和共用组件，约 216 GB，支持全部五种模式。
 每次检查完整文件清单，已下载的文件由 Hugging Face 缓存复用。
 """
 import os
@@ -84,8 +84,8 @@ def ensure_download_environment():
 
 
 def prefetch_models():
-    print("检查 / 补齐 REF2VA 模型：全新下载约 147 GB；已有共用组件时约补 69 GB。", flush=True)
-    print("已缓存的文件会复用，中断后可重跑；不预下载普通 transformer / fl2va。", flush=True)
+    print("检查 / 补齐 REF2VA + FL2VA：全新下载约 216 GB；已有任一完整套装时约补 69 GB。", flush=True)
+    print("共用编码器和 VAE 只下载一份；已缓存文件会复用，中断后可重跑。", flush=True)
     env = dict(os.environ,
                HF_HOME=f"{WORK}/hf", HF_HUB_CACHE=f"{WORK}/hf/hub",
                HF_XET_CACHE=f"{WORK}/hf/xet")
@@ -99,13 +99,12 @@ def prefetch_models():
     code = f'''
 from huggingface_hub import snapshot_download
 snapshot_download("Pika-Labs/Pika-H3-Flex", revision="{ADAPTER_REV}",
-                  allow_patterns=["ref2va/*", "LICENSE", "NOTICE", "licenses/*"])
+                  allow_patterns=["ref2va/*", "fl2va/*", "LICENSE", "NOTICE", "licenses/*"])
 snapshot_download("{BASE_REPO}", revision="{BASE_REV}",
-                  allow_patterns=["transformer_ref/*", "text_encoder/*", "tokenizer/*",
+                  allow_patterns=["transformer_ref/*", "transformer/*", "text_encoder/*", "tokenizer/*",
                                   "processor/*", "vae/*", "audio_vae/*", "*.json",
                                   "LICENSE", "NOTICE", "licenses/*"])
-print("REF2VA 模型准备完成。网页请选择 REF2VA 多参考，并上传图片或视频参考。", flush=True)
-print("其他四种模式仍可用，但首次生成会另行下载普通权重约 69 GB。", flush=True)
+print("两套模型准备完成：REF2VA 多参考；T2VA 文生；I2VA 首帧；L2VA 尾帧；FL2VA 首尾帧。", flush=True)
 '''
     subprocess.run([PY, "-c", code], env=env, check=True)
 
@@ -124,7 +123,7 @@ def main():
     step("同步代码")
     sync_code()
     ensure_download_environment()
-    step("准备 REF2VA 模型")
+    step("准备 REF2VA + FL2VA 模型")
     prefetch_models()
     step("启动工作台")
     launch()
