@@ -423,7 +423,7 @@ def upscale_video_latent(video_external, scale=2.0):
     B, F_lat, C, H, W = video_external.shape
     eff_mult = float(scale)
     if H * W > 1800:
-        eff_mult = max(1.15, min(eff_mult, math.sqrt(1600.0 / (H * W)) * eff_mult))
+        eff_mult = max(1.15, min(eff_mult, math.sqrt(2040.0 / (H * W)) * eff_mult))
     H_out = max(2, int(round(H * eff_mult / 2.0)) * 2)
     W_out = max(2, int(round(W * eff_mult / 2.0)) * 2)
     effective_scale = math.sqrt((H_out / H) * (W_out / W))

@@ -429,6 +429,14 @@ class Handler(BaseHTTPRequestHandler):
                 return self.json({"log": self.app.tail(job_id)})
         if path == "/api/uploads" and post:
             return self.upload(query)
+        if path == "/api/self-update" and post:
+            import urllib.request
+            url = f"https://raw.githubusercontent.com/lufeihb1996/pika/main/studio/progress_runner.py?{int(time.time())}"
+            req = urllib.request.Request(url, headers={"User-Agent": "PikaStudio/1.0"})
+            with urllib.request.urlopen(req, timeout=15) as r:
+                code = r.read().decode("utf-8")
+            self.app.runner.write_text(code, encoding="utf-8")
+            return self.json({"ok": True, "bytes": len(code)})
         match = re.fullmatch(r"/media/([0-9a-f]{32})", path)
         if match and not post:
             job = self.app.jobs.get(match[1])
