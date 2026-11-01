@@ -154,6 +154,8 @@ def refine(args):
     import comfy.samplers
     import comfy.utils
     from comfy_extras import nodes_custom_sampler as samplers
+    # Do not report the previous job's sampling callback during a new encode.
+    comfy.utils.set_progress_bar_global_hook(None)
 
     async def load_plugins():
         for name in ("Comfyui_Minimax_h3_latent_Upscaler", "ComfyUI-Open-H3-Regenerate"):
