@@ -157,24 +157,49 @@ def extract_pass2_args(argv):
 
 
 def _detect_upscaler_arch(sd):
-    mid_ch = int(sd["in_conv.weight"].shape[0])
-    in_ch = int(sd["in_conv.weight"].shape[1])
-    block_ids = set()
-    has_temporal_conv = False
-    for k in sd.keys():
-        if k.startswith("blocks."):
-            parts = k.split(".")
-            if parts[1].isdigit():
-                block_ids.add(int(parts[1]))
-            if "temporal.conv." in k:
-                has_temporal_conv = True
-    return {
-        "channels": in_ch,
-        "mid_channels": mid_ch,
-        "num_blocks": (max(block_ids) + 1) if block_ids else 6,
-        "temporal_mode": "conv" if has_temporal_conv else "none",
-        "has_attn": any(k.startswith("attn.") for k in sd.keys()),
+    import re
+    cfg = {
+        "in_channels": 24,
+        "in_blocks": 12,
+        "out_blocks": 12,
+        "channels": 512,
+        "dropout": 0.1,
+        "attn": False,
+        "temporal_every": 2,
+        "temporal_kernel": 5,
     }
+    if "conv_in.weight" in sd:
+        cfg["in_channels"] = int(sd["conv_in.weight"].shape[1])
+        cfg["channels"] = int(sd["conv_in.weight"].shape[0])
+    in_ids, out_ids = set(), set()
+    temporal_in_indices, temporal_out_indices = set(), set()
+    for k in sd.keys():
+        m = re.match(r"in_blocks\.(\d+)\.in_layers\.", k)
+        if m:
+            in_ids.add(int(m.group(1)))
+        m = re.match(r"out_blocks\.(\d+)\.in_layers\.", k)
+        if m:
+            out_ids.add(int(m.group(1)))
+        m = re.match(r"in_blocks\.(\d+)\.dwconv\.weight", k)
+        if m:
+            temporal_in_indices.add(int(m.group(1)))
+        m = re.match(r"out_blocks\.(\d+)\.dwconv\.weight", k)
+        if m:
+            temporal_out_indices.add(int(m.group(1)))
+    if in_ids:
+        cfg["in_blocks"] = len(in_ids)
+    if out_ids:
+        cfg["out_blocks"] = len(out_ids)
+    if temporal_in_indices or temporal_out_indices:
+        cfg["temporal_every"] = 2
+        for k in sd.keys():
+            if k.endswith("dwconv.weight"):
+                cfg["temporal_kernel"] = int(sd[k].shape[2])
+                break
+    else:
+        cfg["temporal_every"] = 0
+    cfg["attn"] = False
+    return cfg
 
 
 def _build_latent_resizer_3d(sd):
@@ -182,124 +207,202 @@ def _build_latent_resizer_3d(sd):
     import torch.nn as nn
     import torch.nn.functional as F
 
-    arch = _detect_upscaler_arch(sd)
+    cfg = _detect_upscaler_arch(sd)
+
+    def normalization(channels):
+        return nn.GroupNorm(32, channels)
+
+    def zero_module(module):
+        for p in module.parameters():
+            p.detach().zero_()
+        return module
 
     class AttnBlock3D(nn.Module):
-        def __init__(self, channels, num_heads=8):
+        def __init__(self, in_channels):
             super().__init__()
-            self.norm = nn.GroupNorm(32, channels)
-            self.num_heads = num_heads
-            self.head_dim = channels // num_heads
-            self.qkv = nn.Conv3d(channels, channels * 3, 1)
-            self.proj = nn.Conv3d(channels, channels, 1)
+            self.norm = normalization(in_channels)
+            self.q = nn.Conv3d(in_channels, in_channels, 1)
+            self.k = nn.Conv3d(in_channels, in_channels, 1)
+            self.v = nn.Conv3d(in_channels, in_channels, 1)
+            self.proj_out = nn.Conv3d(in_channels, in_channels, 1)
 
         def forward(self, x):
             B, C, T, H, W = x.shape
             h = self.norm(x)
-            qkv = self.qkv(h).reshape(B, 3, self.num_heads, self.head_dim, T * H * W)
-            q, k, v = qkv[:, 0], qkv[:, 1], qkv[:, 2]
-            q = q.permute(0, 1, 3, 2)
-            k = k.permute(0, 1, 3, 2)
-            v = v.permute(0, 1, 3, 2)
-            attn = F.scaled_dot_product_attention(q, k, v)
-            attn = attn.permute(0, 1, 3, 2).reshape(B, C, T, H, W)
-            return x + self.proj(attn)
-
-    class TemporalConv(nn.Module):
-        def __init__(self, channels):
-            super().__init__()
-            self.norm = nn.GroupNorm(32, channels)
-            self.conv = nn.Sequential(
-                nn.SiLU(),
-                nn.Conv3d(channels, channels, kernel_size=(3, 1, 1), padding=(1, 0, 0), groups=channels),
-                nn.SiLU(),
-                nn.Conv3d(channels, channels, kernel_size=1),
-            )
-
-        def forward(self, x):
-            return x + self.conv(self.norm(x))
+            q = self.q(h).view(B, 1, C, T * H * W).permute(0, 1, 3, 2)
+            k = self.k(h).view(B, 1, C, T * H * W).permute(0, 1, 3, 2)
+            v = self.v(h).view(B, 1, C, T * H * W).permute(0, 1, 3, 2)
+            h = F.scaled_dot_product_attention(q, k, v)
+            h = h.permute(0, 1, 3, 2).reshape(B, C, T, H, W)
+            return x + self.proj_out(h)
 
     class ResBlockEmb3D(nn.Module):
-        def __init__(self, channels, emb_dim, temporal_mode="conv"):
+        def __init__(self, channels, emb_channels, dropout=0, out_channels=None):
             super().__init__()
-            self.norm1 = nn.GroupNorm(32, channels)
-            self.conv1 = nn.Conv3d(channels, channels, 3, padding=1)
-            self.norm2 = nn.GroupNorm(32, channels)
-            self.conv2 = nn.Conv3d(channels, channels, 3, padding=1)
-            self.emb_proj = nn.Sequential(nn.SiLU(), nn.Linear(emb_dim, channels * 2))
-            self.act = nn.SiLU()
-            self.temporal = TemporalConv(channels) if temporal_mode == "conv" else None
+            self.out_channels = out_channels or channels
+            self.in_layers = nn.Sequential(
+                normalization(channels),
+                nn.SiLU(),
+                nn.Conv3d(channels, self.out_channels, 3, padding=1),
+            )
+            self.emb_layers = nn.Sequential(
+                nn.SiLU(),
+                nn.Linear(emb_channels, 2 * self.out_channels),
+            )
+            self.out_norm = normalization(self.out_channels)
+            self.out_layers = nn.Sequential(
+                nn.SiLU(),
+                nn.Dropout(p=dropout),
+                zero_module(nn.Conv3d(self.out_channels, self.out_channels, 3, padding=1)),
+            )
+            self.skip = (
+                nn.Conv3d(channels, self.out_channels, 1)
+                if self.out_channels != channels
+                else nn.Identity()
+            )
 
         def forward(self, x, emb):
-            h = self.conv1(self.act(self.norm1(x)))
-            emb_out = self.emb_proj(emb)[:, :, None, None, None]
-            scale, shift = emb_out.chunk(2, dim=1)
-            h = self.norm2(h) * (1 + scale) + shift
-            h = x + self.conv2(self.act(h))
-            if self.temporal is not None:
-                h = self.temporal(h)
-            return h
+            h = self.in_layers(x)
+            emb_out = self.emb_layers(emb).type(h.dtype)
+            while len(emb_out.shape) < len(h.shape):
+                emb_out = emb_out[..., None]
+            scale, shift = torch.chunk(emb_out, 2, dim=1)
+            h = self.out_norm(h) * (1 + scale) + shift
+            h = self.out_layers(h)
+            return self.skip(x) + h
+
+    class TemporalConv(nn.Module):
+        def __init__(self, channels, kernel_size=5):
+            super().__init__()
+            padding = kernel_size // 2
+            self.norm = normalization(channels)
+            self.dwconv = nn.Conv3d(
+                channels,
+                channels,
+                kernel_size=(kernel_size, 1, 1),
+                padding=(padding, 0, 0),
+                groups=channels,
+            )
+            self.pwconv = nn.Conv3d(channels, channels, kernel_size=1)
+
+        def forward(self, x):
+            identity = x
+            h = F.silu(self.norm(x))
+            h = self.dwconv(h)
+            h = self.pwconv(h)
+            return identity + h
 
     class LatentResizer3D(nn.Module):
-        def __init__(self, channels=24, mid_channels=512, num_blocks=6, temporal_mode="conv", has_attn=True):
+        def __init__(
+            self,
+            in_channels=24,
+            in_blocks=12,
+            out_blocks=12,
+            channels=512,
+            dropout=0.1,
+            attn=False,
+            temporal_every=2,
+            temporal_kernel=5,
+        ):
             super().__init__()
-            emb_dim = mid_channels // 4
-            self.scale_mlp = nn.Sequential(
-                nn.Linear(1, emb_dim),
+            self.conv_in = nn.Conv3d(in_channels, channels, 3, padding=1)
+            embed_dim = 64
+            self.embed = nn.Sequential(
+                nn.Linear(1, embed_dim),
                 nn.SiLU(),
-                nn.Linear(emb_dim, emb_dim),
+                nn.Linear(embed_dim, embed_dim),
             )
-            self.in_conv = nn.Conv3d(channels, mid_channels, 3, padding=1)
-            self.blocks = nn.ModuleList([
-                ResBlockEmb3D(mid_channels, emb_dim, temporal_mode=temporal_mode) for _ in range(num_blocks)
-            ])
-            self.attn = AttnBlock3D(mid_channels, num_heads=8) if has_attn else None
-            self.mid_idx = num_blocks // 2
-            self.out_norm = nn.GroupNorm(32, mid_channels)
-            self.out_conv = nn.Conv3d(mid_channels, channels, 3, padding=1)
-            self.act = nn.SiLU()
-            self.residual_gain = nn.Parameter(torch.ones(1))
+            self.in_blocks = nn.ModuleList()
+            for b in range(in_blocks):
+                if (b == 1 or b == in_blocks - 1) and attn:
+                    self.in_blocks.append(AttnBlock3D(channels))
+                self.in_blocks.append(ResBlockEmb3D(channels, embed_dim, dropout))
+                if temporal_every > 0 and b % temporal_every == 0:
+                    self.in_blocks.append(TemporalConv(channels, temporal_kernel))
 
-        def _forward_core(self, x_up, scale_emb):
-            h = self.in_conv(x_up)
-            for i, block in enumerate(self.blocks):
-                h = block(h, scale_emb)
-                if self.attn is not None and i == self.mid_idx - 1:
-                    h = self.attn(h)
-            return x_up + self.residual_gain * self.out_conv(self.act(self.out_norm(h)))
+            self.out_blocks = nn.ModuleList()
+            for b in range(out_blocks):
+                if (b == 1 or b == out_blocks - 1) and attn:
+                    self.out_blocks.append(AttnBlock3D(channels))
+                self.out_blocks.append(ResBlockEmb3D(channels, embed_dim, dropout))
+                if temporal_every > 0 and b % temporal_every == 0:
+                    self.out_blocks.append(TemporalConv(channels, temporal_kernel))
 
-        def forward(self, x, scale=2.0, target_size=None, chunk_size=8, chunk_overlap=2):
+            self.norm_out = normalization(channels)
+            self.conv_out = nn.Conv3d(channels, in_channels, 3, padding=1)
+
+        def _forward_seg(self, x, scale, size):
+            scale_emb = torch.tensor(
+                [scale - 1.0 if scale is not None else 0.0],
+                dtype=x.dtype,
+                device=x.device,
+            ).unsqueeze(0)
+            emb = self.embed(scale_emb)
+            x = self.conv_in(x)
+            for b in self.in_blocks:
+                if isinstance(b, ResBlockEmb3D):
+                    x = b(x, emb.expand(x.shape[0], -1))
+                else:
+                    x = b(x)
+            x = F.interpolate(x, size=size, mode="trilinear", align_corners=False)
+            for b in self.out_blocks:
+                if isinstance(b, ResBlockEmb3D):
+                    x = b(x, emb.expand(x.shape[0], -1))
+                else:
+                    x = b(x)
+            x = F.silu(self.norm_out(x))
+            return self.conv_out(x)
+
+        def forward(self, x, scale=2.0, target_size=None, enable_chunking=True):
+            if target_size is not None:
+                size = target_size
+            elif scale is not None:
+                size = tuple(int(round(s * scale)) for s in x.shape[-3:])
+            else:
+                return x
+            if size == x.shape[-3:]:
+                return x
             B, C, T, H, W = x.shape
-            if target_size is None:
-                target_size = (T, int(round(H * scale)), int(round(W * scale)))
-            x_up = F.interpolate(x, size=target_size, mode="trilinear", align_corners=False)
-            scale_t = torch.tensor([[scale]], device=x.device, dtype=x.dtype).expand(B, 1)
-            scale_emb = self.scale_mlp(scale_t)
-            if T <= chunk_size:
-                return self._forward_core(x_up, scale_emb)
-            step = chunk_size - chunk_overlap
-            out = torch.zeros_like(x_up)
-            weight = torch.zeros((1, 1, T, 1, 1), device=x.device, dtype=x.dtype)
-            for start in range(0, T, step):
-                end = min(start + chunk_size, T)
-                chunk_len = end - start
-                pred = self._forward_core(x_up[:, :, start:end], scale_emb)
-                w = torch.ones((1, 1, chunk_len, 1, 1), device=x.device, dtype=x.dtype)
-                if start > 0 and chunk_overlap > 0:
-                    ramp_len = min(chunk_overlap, chunk_len)
-                    ramp = torch.linspace(0, 1, ramp_len + 2, device=x.device, dtype=x.dtype)[1:-1]
-                    w[:, :, :ramp_len] = ramp.view(1, 1, -1, 1, 1)
-                if end < T and chunk_overlap > 0:
-                    ramp_len = min(chunk_overlap, chunk_len)
-                    ramp = torch.linspace(1, 0, ramp_len + 2, device=x.device, dtype=x.dtype)[1:-1]
-                    w[:, :, -ramp_len:] = ramp.view(1, 1, -1, 1, 1)
-                out[:, :, start:end] += pred * w
-                weight[:, :, start:end] += w
-                if end == T:
+            tk = 0
+            for b in self.in_blocks:
+                if isinstance(b, TemporalConv):
+                    tk = int(b.dwconv.weight.shape[2])
                     break
-            return out / weight.clamp(min=1e-6)
+            overlap = tk
+            chunk = 32
+            if not enable_chunking or T <= chunk:
+                return self._forward_seg(x, scale, size)
+            x_padded = F.pad(x, (0, 0, 0, 0, overlap, overlap), mode="replicate")
+            out_full = torch.zeros(B, C, T, size[-2], size[-1], device=x.device, dtype=x.dtype)
+            weight_full = torch.zeros(1, 1, T, 1, 1, device=x.device, dtype=x.dtype)
+            start = 0
+            while start < T:
+                seg_start = start
+                seg_end = min(T, start + chunk)
+                out_start = max(0, seg_start - overlap)
+                out_end = min(T, seg_end + overlap)
+                lo = max(0, out_start - overlap)
+                hi = min(T + 2 * overlap, out_end + overlap)
+                seg = x_padded[:, :, lo:hi].contiguous()
+                seg_out = self._forward_seg(seg, scale, (hi - lo, size[-2], size[-1]))
+                s0 = (out_start + overlap) - lo
+                s1 = s0 + (out_end - out_start)
+                valid_out = seg_out[:, :, s0:s1]
+                n_valid = out_end - out_start
+                weight = torch.ones(n_valid, device=x.device, dtype=x.dtype)
+                if seg_start > out_start:
+                    blend_len = seg_start - out_start
+                    weight[:blend_len] = torch.arange(1, blend_len + 1, device=x.device, dtype=x.dtype) / (blend_len + 1)
+                if out_end > seg_end:
+                    blend_len = out_end - seg_end
+                    weight[-blend_len:] = torch.arange(blend_len, 0, -1, device=x.device, dtype=x.dtype) / (blend_len + 1)
+                out_full[:, :, out_start:out_end] += valid_out * weight.view(1, 1, n_valid, 1, 1)
+                weight_full[:, :, out_start:out_end] += weight.view(1, 1, n_valid, 1, 1)
+                start += chunk
+                del seg, seg_out, valid_out
+            return out_full / weight_full.clamp(min=1e-8)
 
-    model = LatentResizer3D(**arch)
+    model = LatentResizer3D(**cfg)
     model.load_state_dict(sd, strict=True)
     return model
 
