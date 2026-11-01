@@ -1,0 +1,61 @@
+"""Regression checks for Colab images without ensurepip and cloud env restoration."""
+import importlib.util
+from pathlib import Path
+import sys
+import tempfile
+import unittest
+from unittest.mock import Mock, patch
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "studio"))
+import openh3_setup as setup
+
+spec = importlib.util.spec_from_file_location("colab_launcher", ROOT / "colab_launcher.py")
+launcher = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(launcher)
+
+
+class SetupTests(unittest.TestCase):
+    def test_partial_venv_is_repaired_and_missing_ensurepip_installed(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            python = root / "venv/bin/python"
+            python.parent.mkdir(parents=True)
+            python.touch()
+            with patch.object(setup.subprocess, "run", side_effect=[Mock(returncode=1), Mock(returncode=1)]), patch.object(setup, "run") as run, patch.object(setup.os, "geteuid", return_value=0, create=True), patch.object(setup.shutil, "which", return_value="/usr/bin/apt-get"):
+                self.assertEqual(setup.ensure_venv(root), python)
+            self.assertEqual(run.call_args_list[0].args, ("apt-get", "update", "-qq"))
+            self.assertIn("-venv", run.call_args_list[1].args[-1])
+            self.assertIn("venv", run.call_args_list[2].args)
+            self.assertEqual(run.call_args_list[-1].args[1:], ("-m", "pip", "--version"))
+
+    def test_working_venv_is_reused(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            python = root / "venv/bin/python"
+            python.parent.mkdir(parents=True)
+            python.touch()
+            with patch.object(setup.subprocess, "run", return_value=Mock(returncode=0)), patch.object(setup, "run") as run:
+                setup.ensure_venv(root)
+            run.assert_not_called()
+
+    def test_cloud_archive_is_only_used_for_environment(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            backup = root / "env.tar.gz"
+            backup.touch()
+            work = root / "work"
+            with patch.object(launcher, "ENV_BACKUP", str(backup)), patch.object(launcher.subprocess, "run") as run:
+                launcher.restore_pika_environment(work)
+            self.assertEqual(run.call_args.args[0], ["tar", "-xzf", str(backup), "-C", str(work)])
+            (work / "environment-ready.json").touch()
+            python = work / "venv-py312/bin/python"
+            python.parent.mkdir(parents=True)
+            python.touch()
+            with patch.object(launcher.subprocess, "run") as run:
+                launcher.restore_pika_environment(work)
+            run.assert_not_called()
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -4,9 +4,11 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import shutil
 import struct
 import subprocess
 import sys
+import sysconfig
 import urllib.request
 
 COMFY_REV = "b1a247c9cf9dbfda4b2c0a0c1d50950667eeaa0c"
@@ -74,12 +76,35 @@ def extract_table(models):
     temporary.replace(target)
 
 
+def ensure_venv(root):
+    """Repair partial venvs too: a python symlink does not imply pip exists."""
+    python = root / "venv/bin/python"
+    ready = python.is_file() and subprocess.run(
+        [str(python), "-m", "pip", "--version"], capture_output=True).returncode == 0
+    if not ready:
+        bootstrap = subprocess.run([sys.executable, "-m", "ensurepip", "--version"], capture_output=True)
+        if bootstrap.returncode:
+            if not hasattr(os, "geteuid") or os.geteuid() != 0 or not shutil.which("apt-get"):
+                raise RuntimeError("Missing venv support; install python%d.%d-venv" % sys.version_info[:2])
+            package = "python%d.%d-venv" % sys.version_info[:2]
+            print(f"补齐 {package}，修复独立精修环境", flush=True)
+            run("apt-get", "update", "-qq")
+            run("apt-get", "install", "-y", "-qq", package)
+        run(sys.executable, "-m", "venv", "--system-site-packages", root / "venv")
+        run(python, "-m", "pip", "--version")
+    # A nested venv does not inherit the parent venv's packages automatically.
+    # Read Pika's already-installed CUDA wheels; pip installs overrides locally.
+    source = Path(sysconfig.get_path("purelib"))
+    destination = root / ("venv/lib/python%d.%d/site-packages" % sys.version_info[:2])
+    destination.mkdir(parents=True, exist_ok=True)
+    if source.resolve() != destination.resolve():
+        (destination / "pika_base_packages.pth").write_text(str(source) + "\n", encoding="utf-8")
+    return python
+
+
 def prepare(root):
     root.mkdir(parents=True, exist_ok=True)
-    python = root / "venv/bin/python"
-    if not python.is_file():
-        # Reuse installed CUDA torch; all added packages stay in the refiner venv.
-        run(sys.executable, "-m", "venv", "--system-site-packages", root / "venv")
+    python = ensure_venv(root)
     comfy = root / "engine"
     marker = root / "ready.json"
     fingerprint = hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
@@ -104,11 +129,12 @@ def download_models(root):
     revisions_file = root / "model-revisions.json"
     revisions = json.loads(revisions_file.read_text()) if revisions_file.is_file() else {}
     for repo, filename, subdir in MODELS:
+        dest = models / subdir
+        dest.mkdir(parents=True, exist_ok=True)
         if repo not in revisions:
             revisions[repo] = model_info(repo).sha
             revisions_file.write_text(json.dumps(revisions, indent=2), encoding="utf-8")
-        dest = models / subdir
-        dest.mkdir(parents=True, exist_ok=True)
+        print(f"检查 / 下载模型: {repo}/{filename}", flush=True)
         # local_dir resumes partial downloads and checks HF metadata on subsequent setup.
         downloaded = Path(hf_hub_download(repo, filename, revision=revisions[repo], local_dir=str(root / "downloads" / repo.replace("/", "--"))))
         target = dest / Path(filename).name

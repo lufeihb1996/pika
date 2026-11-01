@@ -21,6 +21,7 @@ PORT = 8188  # 复用原来 ComfyUI 的隧道服务端口。
 STORAGE_ROOT = ""  # 空白自动检测 scratch；也可填 /mnt/local-scratch。
 HTTP_DOWNLOAD = False  # Xet 下载异常时设 True，后续生成进程走普通 HTTP。
 PREPARE_OPENH3 = True  # 启动时准备独立 INT8 二采，避免首次任务等待下载而超时。
+ENV_BACKUP = "/content/drive/MyDrive/ComfyUI_Models/Pika_H3_Flex/env.tar.gz"
 BUNDLE_GZ_B64 = "__BUNDLE_PLACEHOLDER__"
 
 
@@ -42,14 +43,14 @@ def live_owned(pidfile, expected):
 
 
 def start_tunnel(work, get_secret):
-    token = get_secret("CF_TUNNEL_TOKEN")
-    if not token:
-        print("⚠️ 服务已启动，但缺少 CF_TUNNEL_TOKEN。请在 Colab Secrets 添加并授权后重跑本格。", flush=True)
-        return False
     pidfile = work / "studio-cloudflared.pid"
     if live_owned(pidfile, "cloudflared"):
         print("⏩ 本工作台隧道进程已在运行，连接状态见 studio-cloudflared.log", flush=True)
         return True
+    token = get_secret("CF_TUNNEL_TOKEN")
+    if not token:
+        print("⚠️ 服务已启动，但缺少 CF_TUNNEL_TOKEN。请在 Colab Secrets 添加并授权后重跑本格。", flush=True)
+        return False
     binary = shutil.which("cloudflared")
     if not binary:
         local = Path("/content/cloudflared")
@@ -83,6 +84,19 @@ def start_tunnel(work, get_secret):
         time.sleep(.5)
     print(f"⚠️ 隧道连接尚未确认，请查看 {log}；本地工作台已就绪。", flush=True)
     return False
+
+
+def restore_pika_environment(work):
+    if (work / "environment-ready.json").is_file() and (work / "venv-py312/bin/python").is_file():
+        print("Pika 环境已在本地，复用现有环境；模型由 HF 缓存 / 下载补齐。", flush=True)
+        return
+    backup = Path(ENV_BACKUP)
+    if backup.is_file():
+        work.mkdir(parents=True, exist_ok=True)
+        print(f"从已挂载云盘恢复 Pika 环境: {backup}", flush=True)
+        subprocess.run(["tar", "-xzf", str(backup), "-C", str(work)], check=True)
+    else:
+        print("未找到已挂载的 Pika 环境备份，使用环境安装器；不从云盘读取模型。", flush=True)
 
 
 def main():
@@ -124,6 +138,7 @@ def main():
             raise RuntimeError(f"{PORT} 已被其他程序占用，请先停止旧 ComfyUI，再运行工作台；本脚本不会杀其他进程。")
     except OSError:
         pass
+    restore_pika_environment(namespace["select_storage"](config))
     work, env, cli = namespace["prepare_environment"]()
     app_dir = work / "studio-app"
     for name, content in payload.items():
