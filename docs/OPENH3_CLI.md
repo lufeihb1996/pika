@@ -12,8 +12,11 @@ HTTP 服务、网页或第二个隧道，但精修依赖固定版本的 ComfyUI 
 和额外磁盘空间；后续复用 `openh3/ready.json`。启动不提交 GPU 生成任务。
 如只用原版 Pika，可将启动格中的 `PREPARE_OPENH3=False`；提交二采时显式选择 `pika`。
 
-云盘只用于恢复 Pika 环境：已挂载的
+云盘只备份运行环境。Pika 环境来自已挂载的
 `/content/drive/MyDrive/ComfyUI_Models/Pika_H3_Flex/env.tar.gz`。本地环境完整时直接复用。
+独立二采环境从同目录的 `openh3_env.tar.gz` 恢复，原 Pika 备份不覆盖。二采备份包含
+`openh3/venv`、固定版本的 `openh3/engine`（排除 models）和模型版本清单；不包含模型、
+视频、任务、凭据或 `ready.json`。恢复后仍通过 setup 检查环境并从 HF 补齐模型。
 模型从 Hugging Face 检查 / 下载，不从云盘复制 B15 模型。精修环境会补齐缺失的
 `python3.12-venv`，并修复创建到一半的虚拟环境；沿用现有 Pika CUDA 包，新增依赖安装到精修环境。
 

@@ -16,6 +16,25 @@ spec.loader.exec_module(launcher)
 
 
 class SetupTests(unittest.TestCase):
+    def test_openh3_archive_restores_without_claiming_models_are_ready(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "openh3"
+            root.mkdir()
+            (root/"ready.json").write_text("{}")
+            archive = Path(directory)/"openh3_env.tar.gz"
+            archive.touch()
+            with patch.object(setup, "ENV_BACKUP", str(archive)), patch.object(setup, "run") as run:
+                self.assertTrue(setup.restore_environment(root))
+            self.assertEqual(run.call_args.args, ("tar", "-xzf", archive, "-C", root, "--strip-components=1"))
+            self.assertFalse((root/"ready.json").exists())
+            packages=root/"venv/lib/python3.12/site-packages"
+            for name in ("torch", "comfy_kitchen"):
+                (packages/name).mkdir(parents=True)
+                (packages/name/"__init__.py").touch()
+            with patch.object(setup, "run") as run:
+                self.assertFalse(setup.restore_environment(root))
+            run.assert_not_called()
+
     def test_cuda_129_is_upgraded_only_in_refiner_environment(self):
         python = Path("/refiner/venv/bin/python")
         with patch.object(setup, "probe_torch", side_effect=[{"torch":"2.13.0+cu129","cuda":"12.9"}, {"torch":"2.13.0+cu130","cuda":"13.0"}]), patch.object(setup, "run") as run:

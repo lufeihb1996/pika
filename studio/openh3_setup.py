@@ -17,6 +17,7 @@ REGEN_REV = "9b686c5ffd380e9d1351f9b8beef6d20d703ca3e"
 UPSCALE_REV = "40316cf008b2fd8663263270669eb4da23f89d2c"
 TABLE_SHA = "c02a6c11888297688c1e6278185ea1f947023acfc69f9003bbcdcec9a229a8e7"
 CUDA_WHEELS = ("torch==2.11.0+cu130", "torchvision==0.26.0+cu130", "torchaudio==2.11.0+cu130")
+ENV_BACKUP = "/content/drive/MyDrive/ComfyUI_Models/Pika_H3_Flex/openh3_env.tar.gz"
 MODELS = [
     ("Comfy-Org/MiniMax-H3", "diffusion_models/minimax_h3_fl2va_pruned_int8_convrot.safetensors", "diffusion_models"),
     ("Comfy-Org/MiniMax-H3", "text_encoders/qwen3vl_32b_minimax_h3_int8_convrot.safetensors", "text_encoders"),
@@ -76,6 +77,22 @@ def extract_table(models):
     temporary = target.with_suffix(".part")
     save_file({"adaln_t_table": torch.frombuffer(bytearray(raw), dtype=torch.float32).reshape(1025, 8).clone()}, str(temporary))
     temporary.replace(target)
+
+
+def restore_environment(root):
+    """Restore the extra cu130 environment only; weights remain HF downloads."""
+    packages = root / "venv/lib/python3.12/site-packages"
+    if (packages / "torch/__init__.py").is_file() and (packages / "comfy_kitchen/__init__.py").is_file():
+        return False
+    backup = Path(ENV_BACKUP)
+    if not backup.is_file():
+        return False
+    root.mkdir(parents=True, exist_ok=True)
+    print(f"从云盘恢复 OpenH3 CUDA13 环境: {backup}", flush=True)
+    run("tar", "-xzf", backup, "-C", root, "--strip-components=1")
+    # This archive excludes models and does not establish model readiness.
+    (root / "ready.json").unlink(missing_ok=True)
+    return True
 
 
 def ensure_venv(root):
@@ -145,6 +162,7 @@ def prepare(root):
 
 
 def _prepare_locked(root):
+    restore_environment(root)
     python = ensure_venv(root)
     comfy = root / "engine"
     marker = root / "ready.json"
