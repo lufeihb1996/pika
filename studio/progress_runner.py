@@ -330,7 +330,7 @@ def upscale_video_latent(video_external, scale=2.0):
     s_norm = video_external.permute(0, 2, 1, 3, 4).contiguous().to(device=device, dtype=torch.float16)
     with torch.no_grad():
         up = model(s_norm, scale=float(effective_scale), target_size=(F_lat, H_out, W_out))
-    video_up = up.permute(0, 2, 1, 3, 4).contiguous().to(dtype=torch.bfloat16).cpu()
+    video_up = up.permute(0, 2, 1, 3, 4).contiguous().to(dtype=torch.float32).cpu()
     del model, raw_sd, s_norm, up
     gc.collect()
     torch.cuda.empty_cache()
@@ -339,48 +339,68 @@ def upscale_video_latent(video_external, scale=2.0):
 
 def run_pass2_refine(args, source_video, start_sigma=0.78, upscale_factor=2.0, cached_pair=None):
     """Execute Single-Video Pass-2 full-BF16 3-step refinement."""
+    from PIL import Image
     import torch
     import pika_h3.pipeline as pipeline
-    from pika_h3.cli import parse_refs
-    from pika_h3.core import conditioning, evaluation, loader, vae
-    from pika_h3.core.media import decode_video_reference
-    from pika_h3.core.schedules import audio_frames
+    from pika_h3.core import conditioning, evaluation, geometry as G, loader, vae
+    from pika_h3.core.conditioning import Reference, Request
+    from pika_h3.core.loader import apply_lora, load_lora_weights
+    from pika_h3.core.media import decode_video_reference, preflight_reference_specs
+    from pika_h3.core.numerics import configure_numerics_backend, prepare_conditioning
     from pika_h3.core.sampling import add_noise
-    from pika_h3.core.wrapper import PikaH3Wrapper
+    from pika_h3.core.wrapper import H3DiffusionWrapper
 
     prompt = args.prompt_file.read_text(encoding="utf-8").strip() if args.prompt_file else (args.prompt or "").strip()
-    refs = parse_refs(args.ref)
-    assets = pipeline.resolve_assets(args.task, args.model_repo, args.revision, args.base_repo, args.base_revision)
-    device = torch.device("cuda")
-    dtype = torch.bfloat16
+    preflight_reference_specs(args.ref)
+    references = [Reference.from_spec(spec) for spec in args.ref]
 
-    encoder = conditioning.H3ConditionEncoder(assets.base, device, dtype)
+    base, adapter, manifest = pipeline.resolve_assets(args)
+    policy = manifest["numerics_policy"]
+    configure_numerics_backend(policy, runtime="inference")
+
+    encoder = conditioning.H3ConditionEncoder(
+        str(base),
+        device="cuda",
+        keep_loaded=True,
+        text_encoder_checkpoint=str(args.text_encoder_path) if getattr(args, "text_encoder_path", None) else None,
+    )
 
     video_low = None
     audio_low = None
     if cached_pair is not None and cached_pair[0] is not None and cached_pair[1] is not None:
-        video_low, audio_low = cached_pair
+        v_raw, a_raw = cached_pair
+        video_low = (v_raw if v_raw.ndim == 5 else v_raw.unsqueeze(0)).to(dtype=torch.float32).cpu()
+        audio_low = (a_raw if a_raw.ndim == 3 else a_raw.unsqueeze(0)).to(dtype=torch.float32).cpu()
     elif source_video and Path(source_video).is_file():
         cache_file = latent_cache_path(args.output, source_video)
         if cache_file.is_file():
             emit("conditioning", "命中一采潜变量无损缓存 (.latents)")
             blob = torch.load(cache_file, map_location="cpu", weights_only=True)
-            video_low = blob["video"].unsqueeze(0).to(dtype)
-            audio_low = blob["audio"].unsqueeze(0).to(dtype)
+            v_raw = blob["video"]
+            a_raw = blob["audio"]
+            video_low = (v_raw if v_raw.ndim == 5 else v_raw.unsqueeze(0)).to(dtype=torch.float32).cpu()
+            audio_low = (a_raw if a_raw.ndim == 3 else a_raw.unsqueeze(0)).to(dtype=torch.float32).cpu()
         else:
             emit("conditioning", "编码一采原片潜变量")
-            frames_t, waveform, sr = decode_video_reference(Path(source_video))
-            vae_enc, _ = encoder._load_vaes()
-            if hasattr(vae_enc, "enable_tiling"):
-                vae_enc.enable_tiling()
-            h_in = max(16, (int(frames_t.shape[-2]) // 16) * 16)
-            w_in = max(16, (int(frames_t.shape[-1]) // 16) * 16)
-            video_low = encoder.encode_video_latent(frames_t, height=h_in, width=w_in).unsqueeze(0).cpu()
-            dur_in = max(1, round((video_low.shape[1] - 1) * 4 / 24))
-            if waveform is not None:
-                audio_low = encoder.encode_audio_latent(waveform, sr, duration=dur_in).unsqueeze(0).cpu()
+            frames_np, _fps_in, wave_np = decode_video_reference(Path(source_video))
+            video_low = encoder.encode_video_latent(frames_np).to(dtype=torch.float32).cpu()
+            f_lat_in = int(video_low.shape[1])
+            frames_in = (f_lat_in - 2) // G.VAE_LATENTS_PER_CHUNK * G.VAE_FRAMES_PER_CHUNK + G.VAE_LATENTS_PER_CHUNK
+            target_a_in = G.audio_latent_num_frames(frames_in)
+            if wave_np is not None:
+                audio_low = encoder.encode_audio_latent(wave_np).to(dtype=torch.float32).cpu()
             else:
-                audio_low = torch.zeros((1, audio_frames(dur_in), 128), dtype=dtype)
+                audio_low = torch.zeros((1, target_a_in, G.AUDIO_EXTERNAL_DIM), dtype=torch.float32)
+            try:
+                torch.save(
+                    {
+                        "video": video_low[0].detach().to(torch.float16).cpu(),
+                        "audio": audio_low[0].detach().to(torch.float32).cpu(),
+                    },
+                    cache_file,
+                )
+            except Exception:
+                pass
     else:
         raise ValueError("二采精修缺少一采原片或潜变量输入")
 
@@ -388,71 +408,110 @@ def run_pass2_refine(args, source_video, start_sigma=0.78, upscale_factor=2.0, c
     emit("upscaling", f"二采 {tier} · 3D 潜变量 {upscale_factor:g}x 等比放大")
     video_up = upscale_video_latent(video_low, scale=upscale_factor)
     _, F_lat, _, H_out, W_out = video_up.shape
-    height = H_out * 16
-    width = W_out * 16
-    frames = (F_lat - 1) * 4 + 1
-    duration = max(1, round((frames - 1) / 24))
-    target_a_len = audio_frames(duration)
+    height = H_out * G.VAE_SPATIAL_FACTOR
+    width = W_out * G.VAE_SPATIAL_FACTOR
+    frames = (F_lat - 2) // G.VAE_LATENTS_PER_CHUNK * G.VAE_FRAMES_PER_CHUNK + G.VAE_LATENTS_PER_CHUNK
+    duration = round(frames / G.FPS, 2)
+    target_a_len = G.audio_latent_num_frames(frames)
     if audio_low.shape[1] < target_a_len:
         pad = torch.zeros((1, target_a_len - audio_low.shape[1], audio_low.shape[2]), dtype=audio_low.dtype)
         audio_low = torch.cat([audio_low, pad], dim=1)
     elif audio_low.shape[1] > target_a_len:
         audio_low = audio_low[:, :target_a_len, :]
 
-    req = pipeline.Request(
+    request = Request(
         task=args.task,
         prompt=prompt,
-        negative_prompt=args.negative_prompt,
-        resolution="768p",
-        duration=duration,
-        aspect=args.aspect,
-        seed=args.seed,
-        first_image=args.first_image,
-        last_image=args.last_image,
-        references=refs,
-        cpu_offload=True,
+        first_image=Image.open(args.first_image).convert("RGB") if args.first_image else None,
+        last_image=Image.open(args.last_image).convert("RGB") if args.last_image else None,
+        references=references,
+        height=height,
+        width=width,
+        num_frames=frames,
+        reference_rule="tiered",
         reference_short_edge=1024,
-        output=args.output,
+        keyframe_fit="crop",
     )
-    cond = encoder.encode(req, width=width, height=height, frames=frames)
+    cond = encoder.encode(request)
     encoder.free()
+    del encoder
+    gc.collect()
+    torch.cuda.empty_cache()
 
-    # Load full BF16 transformer + Pika adapter with block-level group offload for 1080p VRAM safety
-    model = loader.build_transformer(assets.base, assets.transformer_subfolder, assets.adapter,
-                                     device=device, cpu_offload=True)
-    wrapper = PikaH3Wrapper(model, cond, width=width, height=height, frames=frames, device=device, dtype=dtype)
-
-    sigmas_v, sigmas_a = build_refine_ladder(start_sigma=start_sigma)
-    gen = torch.Generator(device="cpu").manual_seed((int(args.seed) + 1000) % (2**63 - 1))
-    eps_v = torch.randn(video_up.shape, generator=gen, dtype=torch.float32).to(device=device, dtype=dtype)
-    eps_a = torch.randn(audio_low.shape, generator=gen, dtype=torch.float32).to(device=device, dtype=dtype)
-    noisy_video = add_noise(video_up.to(device=device, dtype=dtype), eps_v, sigmas_v[0])
-    noisy_audio = add_noise(audio_low.to(device=device, dtype=dtype), eps_a, sigmas_a[0])
-    del eps_v, eps_a, video_up
-
-    video_refined, _ = evaluation.sample_evaluation_ladder(
-        wrapper,
-        seed=args.seed,
-        sigmas_v=sigmas_v,
-        sigmas_a=sigmas_a,
-        video_re_noise=0.5,
-        audio_re_noise=0.0,
-        noise=(noisy_video, noisy_audio),
+    use_offload = (
+        bool(getattr(args, "cpu_offload", False))
+        or (F_lat * H_out * W_out > 220000)
+        or (torch.cuda.get_device_properties(0).total_memory < 70 * (1024 ** 3))
     )
+    load_device = "cpu" if use_offload else "cuda"
+    model = loader.build_transformer(str(base), dtype=torch.bfloat16, device=load_device, subfolder=manifest["trunk"])
+    apply_lora(
+        model,
+        rank=manifest["rank"],
+        alpha=manifest["alpha"],
+        target_modules=manifest.get("target_modules"),
+        master_dtype=torch.bfloat16,
+    )
+    load_lora_weights(model, str(adapter))
+    model.requires_grad_(False).eval()
+    if use_offload:
+        model.enable_group_offload(
+            onload_device=torch.device("cuda"),
+            offload_device=torch.device("cpu"),
+            offload_type="block_level",
+            num_blocks_per_group=1,
+            use_stream=True,
+            record_stream=False,
+        )
+    wrapper = H3DiffusionWrapper(model).eval()
+
+    sigmas_v_list, sigmas_a_list = build_refine_ladder(start_sigma=start_sigma)
+    sigmas_v = torch.tensor(sigmas_v_list, device="cuda", dtype=torch.float32)
+    sigmas_a = torch.tensor(sigmas_a_list, device="cuda", dtype=torch.float32)
+
+    gen = torch.Generator(device="cuda").manual_seed((int(args.seed) + 1000) % (2**63 - 1))
+    v_clean = video_up.to(device="cuda", dtype=torch.float32)
+    a_clean = audio_low.to(device="cuda", dtype=torch.float32)
+    eps_v = torch.randn(v_clean.shape, device="cuda", dtype=torch.float32, generator=gen)
+    eps_a = torch.randn(a_clean.shape, device="cuda", dtype=torch.float32, generator=gen)
+    noisy_video = add_noise(v_clean, eps_v, sigmas_v[0])
+    noisy_audio = add_noise(a_clean, eps_a, sigmas_a[0])
+    del v_clean, a_clean, eps_v, eps_a, video_up
+
+    with torch.inference_mode():
+        video_refined, _ = evaluation.sample_evaluation_ladder(
+            wrapper,
+            conditional_dict=prepare_conditioning(cond, "cuda", policy=policy),
+            video_shape=[1, F_lat, G.VIDEO_LATENT_CHANNELS, H_out, W_out],
+            audio_shape=[1, target_a_len, G.AUDIO_EXTERNAL_DIM],
+            sigmas_v=sigmas_v,
+            sigmas_a=sigmas_a,
+            seed=args.seed,
+            device="cuda",
+            noise=(noisy_video, noisy_audio),
+        )
+    video_refined_cpu = video_refined[0].cpu()
+    audio_clean_cpu = audio_low[0].cpu()
+    torch.cuda.synchronize()
 
     del wrapper, model, cond, noisy_video, noisy_audio
     gc.collect()
     torch.cuda.empty_cache()
 
-    decoders = vae.H3Decoders(assets.base, device, dtype)
+    decoders = vae.H3Decoders(str(base), device="cuda")
     if hasattr(decoders.vae, "enable_tiling"):
         decoders.vae.enable_tiling()
-    video_u8 = decoders.decode_video(video_refined)
-    audio_wav = decoders.decode_audio(audio_low.to(device=device, dtype=dtype))
-    decoders.free()
+    with torch.inference_mode():
+        pixels = decoders.decode_video(video_refined_cpu)
+        wave = decoders.decode_audio(audio_clean_cpu)
+    del decoders
+    gc.collect()
+    torch.cuda.empty_cache()
 
-    vae.write_mp4(args.output, video_u8, audio_wav, fps=24, audio_rate=44100)
-    save_latent_cache(args.output, video_refined, audio_low)
+    wave = wave[:, :round(frames / G.FPS * G.AUDIO_SAMPLE_RATE)]
+    args.output.parent.mkdir(parents=True, exist_ok=True)
+    vae.write_mp4(str(args.output), pixels, audio=wave)
+    save_latent_cache(args.output, video_refined_cpu, audio_clean_cpu)
     meta = {
         "task": args.task,
         "prompt": prompt,
