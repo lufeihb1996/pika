@@ -54,6 +54,7 @@ exec(urllib.request.urlopen(
 恢复环境                        Drive 有备份就解压
 拉代码                         git clone
 下 REF + FL2VA 共约 216 GB     共用组件只下一份，已有文件复用，中断后重跑补齐
+下 MOSS 生图三件套约 15.5 GB  独立目录，不启动 ComfyUI
 起 server + 隧道
 ```
 
@@ -62,8 +63,38 @@ exec(urllib.request.urlopen(
 | 你的状态 | 总耗时 |
 |---|---|
 | 会话还在、模型已下 | 20 秒 |
-| 会话没了、Drive 有环境备份 | 环境恢复 + 两套模型约 216 GB 下载，耗时随带宽变化 |
-| 会话没了、Drive 也没备份 | 额外安装环境，再下载两套模型 |
+| 会话没了、Drive 有环境备份 | 环境恢复 + Pika 约 216 GB + MOSS 约 15.5 GB 下载，耗时随带宽变化 |
+| 会话没了、Drive 也没备份 | 额外安装环境，再下载 Pika 与 MOSS 权重 |
+
+### MOSS 独立下载
+
+只补 MOSS、不重跑 Pika 启动流程时，在 Colab 新建一格运行：
+
+```python
+import urllib.request
+exec(urllib.request.urlopen(
+    "https://raw.githubusercontent.com/lufeihb1996/pika/main/colab_moss.py",
+    timeout=60).read().decode("utf-8"))
+```
+
+下载固定版本的三份文件，不下载 MOSS 的 BF16、Base、编辑 LoRA 等其他变体：
+
+| 目录 / 文件 | 大小（十进制 GB） |
+|---|---|
+| `diffusion_models/moss_image_sft_int8_convrot.safetensors` | 5.41 |
+| `text_encoders/qwen3.5_9b_int8_convrot.safetensors` | 9.75 |
+| `vae/flux2-vae.safetensors` | 0.34 |
+
+默认目录为 `/mnt/local-scratch/Pika_H3_Flex_Official/comfy-models/`；无 scratch 盘的独立下载回退到 `/content/ComfyUI/models/`。可在执行下载入口或一键启动入口之前设置 `os.environ["MOSS_MODELS_DIR"] = "/content/ComfyUI/models"`，保存到已有 ComfyUI 的模型目录。已有缓存由 Hugging Face 检查、复用；中断后重跑补齐。MOSS 下载走普通 HTTP，避免原三合一脚本遇到的 Qwen Xet 分块问题。
+
+**下载不等于生图服务已启动。** Pika 官方服务只处理视频。要在 AI Anime Studio 生图，还需运行支持 MOSS 的 ComfyUI，并让它读取上述目录、把可访问地址填入工作台的 ComfyUI 地址。Pika 和 ComfyUI 需要各自可访问的服务地址，同一机器上不能同时占用同一个端口。
+
+仅跑视频而不下载 MOSS 时，在一键启动代码前添加：
+
+```python
+import os
+os.environ["PIKA_DOWNLOAD_MOSS"] = "0"
+```
 
 ### 成功的标志
 

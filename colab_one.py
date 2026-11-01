@@ -8,6 +8,7 @@ Colab 里只需要跑这一行：
         timeout=60).read().decode("utf-8"))
 
 默认预下载 REF2VA、FL2VA 两套权重和共用组件，约 216 GB，支持全部五种模式。
+随后下载独立的 MOSS 生图三件套约 15.5 GB；仅准备权重，不启动 ComfyUI。
 每次检查完整文件清单，已下载的文件由 Hugging Face 缓存复用。
 """
 import os
@@ -83,9 +84,7 @@ def ensure_download_environment():
     namespace["prepare_environment"]()
 
 
-def prefetch_models():
-    print("检查 / 补齐 REF2VA + FL2VA：全新下载约 216 GB；已有任一完整套装时约补 69 GB。", flush=True)
-    print("共用编码器和 VAE 只下载一份；已缓存文件会复用，中断后可重跑。", flush=True)
+def download_environment():
     env = dict(os.environ,
                HF_HOME=f"{WORK}/hf", HF_HUB_CACHE=f"{WORK}/hf/hub",
                HF_XET_CACHE=f"{WORK}/hf/xet")
@@ -96,6 +95,12 @@ def prefetch_models():
             env["HF_TOKEN"] = token
     except Exception:
         pass
+    return env
+
+
+def prefetch_models():
+    print("检查 / 补齐 REF2VA + FL2VA：全新下载约 216 GB；已有任一完整套装时约补 69 GB。", flush=True)
+    print("共用编码器和 VAE 只下载一份；已缓存文件会复用，中断后可重跑。", flush=True)
     code = f'''
 from huggingface_hub import snapshot_download
 snapshot_download("Pika-Labs/Pika-H3-Flex", revision="{ADAPTER_REV}",
@@ -106,7 +111,18 @@ snapshot_download("{BASE_REPO}", revision="{BASE_REV}",
                                   "LICENSE", "NOTICE", "licenses/*"])
 print("两套模型准备完成：REF2VA 多参考；T2VA 文生；I2VA 首帧；L2VA 尾帧；FL2VA 首尾帧。", flush=True)
 '''
-    subprocess.run([PY, "-c", code], env=env, check=True)
+    subprocess.run([PY, "-c", code], env=download_environment(), check=True)
+
+
+def prefetch_moss():
+    if os.environ.get("PIKA_DOWNLOAD_MOSS", "1").strip() == "0":
+        print("PIKA_DOWNLOAD_MOSS=0，跳过 MOSS 权重下载。", flush=True)
+        return
+    env = download_environment()
+    env["MOSS_MODELS_DIR"] = os.environ.get("MOSS_MODELS_DIR") or f"{WORK}/comfy-models"
+    # 另开下载进程，只对 MOSS 关闭 Xet，不改变 Pika 的下载或推理环境。
+    env["HF_HUB_DISABLE_XET"] = "1"
+    subprocess.run([PY, str(SRC / "colab_moss.py")], env=env, check=True)
 
 
 def launch():
@@ -125,6 +141,8 @@ def main():
     ensure_download_environment()
     step("准备 REF2VA + FL2VA 模型")
     prefetch_models()
+    step("准备 MOSS 生图权重（不启动 ComfyUI）")
+    prefetch_moss()
     step("启动工作台")
     launch()
 

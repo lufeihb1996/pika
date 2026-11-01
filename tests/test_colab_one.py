@@ -19,7 +19,7 @@ spec.loader.exec_module(colab)
 class ColabDownloadTests(unittest.TestCase):
     def test_startup_prepares_environment_before_model_download(self):
         order = []
-        functions = ("mount_drive", "restore_env", "sync_code", "ensure_download_environment", "prefetch_models", "launch")
+        functions = ("mount_drive", "restore_env", "sync_code", "ensure_download_environment", "prefetch_models", "prefetch_moss", "launch")
         with contextlib.ExitStack() as stack:
             stack.enter_context(patch.object(colab, "step"))
             for name in functions:
@@ -85,6 +85,24 @@ class ColabDownloadTests(unittest.TestCase):
                 call = self.downloader_call()
                 self.assertEqual(call.kwargs["env"]["HF_HUB_CACHE"], f"{temp}/hf/hub")
                 self.assertEqual(shard.read_bytes(), b"incomplete-model-fixture")
+
+    def test_moss_download_is_separate_from_pika_and_uses_comfy_model_layout(self):
+        with patch.dict(colab.os.environ, {"PIKA_DOWNLOAD_MOSS": "1", "MOSS_MODELS_DIR": ""}), patch.object(colab.subprocess, "run") as run:
+            colab.prefetch_moss()
+        run.assert_called_once()
+        self.assertEqual(run.call_args.args[0], [colab.PY, str(colab.SRC / "colab_moss.py")])
+        env = run.call_args.kwargs["env"]
+        self.assertEqual(env["MOSS_MODELS_DIR"], f"{colab.WORK}/comfy-models")
+        self.assertEqual(env["HF_HUB_DISABLE_XET"], "1")
+        self.assertTrue(run.call_args.kwargs["check"])
+
+    def test_moss_can_be_skipped_or_saved_to_an_existing_comfy_models_directory(self):
+        with patch.dict(colab.os.environ, {"PIKA_DOWNLOAD_MOSS": "0"}), patch.object(colab.subprocess, "run") as run, contextlib.redirect_stdout(io.StringIO()):
+            colab.prefetch_moss()
+        run.assert_not_called()
+        with patch.dict(colab.os.environ, {"PIKA_DOWNLOAD_MOSS": "1", "MOSS_MODELS_DIR": "/content/ComfyUI/models"}), patch.object(colab.subprocess, "run") as run:
+            colab.prefetch_moss()
+        self.assertEqual(run.call_args.kwargs["env"]["MOSS_MODELS_DIR"], "/content/ComfyUI/models")
 
 
 if __name__ == "__main__":
