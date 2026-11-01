@@ -93,6 +93,8 @@ def refine(args):
     if kitchen.int8_attention_is_available():
         sys.argv += ["--use-ck-attention", "--fast", "fp16_accumulation"]
         emit("starting", "OpenH3 启用 Kitchen INT8 attention 与 FP16 accumulation")
+    import comfy.options
+    comfy.options.enable_args_parsing()
     import av
     import nodes
     import comfy.model_management as mm
