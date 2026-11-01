@@ -18,8 +18,19 @@ from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "studio"))
-from server import Studio, Handler, ThreadingHTTPServer
+from server import Studio, Handler, ThreadingHTTPServer, parse_progress_line
 from progress_runner import sampling_observer, build_refine_ladder, extract_pass2_args
+
+
+class ProgressParsingTests(unittest.TestCase):
+    def test_sampling_event_after_tqdm_is_recognized(self):
+        event = {"phase":"sampling", "message":"OpenH3 1/3", "completed":1, "total":3}
+        for prefix in ("", "\r  0%|          | 0/3 [00:00<?, ?it/s]", " 33%|abc| 1/3 "):
+            self.assertEqual(parse_progress_line(prefix + "[PIKA_PROGRESS] " + json.dumps(event) + "\n"), event)
+
+    def test_plain_progress_bars_and_malformed_events_are_ignored(self):
+        for line in ("33%|abc| 1/3", "[PIKA_PROGRESS] broken", "[PIKA_PROGRESS] []", '[PIKA_PROGRESS] {"phase":"sampling"}'):
+            self.assertIsNone(parse_progress_line(line))
 
 
 class StudioTests(unittest.TestCase):

@@ -20,7 +20,7 @@ UPSCALER_FILE = "minimax_h3_latent_upscaler_3d_conv_v1/minimax_h3_latent_upscale
 
 
 def emit(phase, message, **values):
-    print(PREFIX + json.dumps(dict(phase=phase, message=message, **values), ensure_ascii=False), flush=True)
+    print("\n" + PREFIX + json.dumps(dict(phase=phase, message=message, **values), ensure_ascii=False), flush=True)
 
 
 def stage(function, phase, message):

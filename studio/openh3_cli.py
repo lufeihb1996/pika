@@ -12,7 +12,7 @@ import time
 
 
 def emit(phase, message, **data):
-    print("[PIKA_PROGRESS] " + json.dumps(dict(phase=phase, message=message, **data), ensure_ascii=False), flush=True)
+    print("\n[PIKA_PROGRESS] " + json.dumps(dict(phase=phase, message=message, **data), ensure_ascii=False), flush=True)
 
 
 @contextmanager

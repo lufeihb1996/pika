@@ -19,6 +19,23 @@ from urllib.parse import parse_qs, urlparse
 
 MODEL_REV = "0ddf55ad7067ca1e76812253bd7b4600df87f759"
 APP_VERSION = "1.3.0"
+
+
+def parse_progress_line(line):
+    """tqdm can prepend a carriage-return progress bar to a JSON progress event."""
+    marker = "[PIKA_PROGRESS] "
+    offset = line.find(marker)
+    if offset < 0:
+        return None
+    try:
+        progress, _ = json.JSONDecoder().raw_decode(line[offset + len(marker):].lstrip())
+    except ValueError:
+        return None
+    if not isinstance(progress, dict) or not isinstance(progress.get("message"), str):
+        return None
+    return progress
+
+
 TASKS = {"t2va": (False, False), "i2va": (True, False), "l2va": (False, True),
          "fl2va": (True, True), "ref2va": (False, False)}
 ASPECTS = ["16:9", "9:16", "1:1", "21:9", "3:2", "4:3", "5:4", "4:5", "3:4", "2:3", "9:21"]
@@ -250,17 +267,14 @@ class Studio:
                     for line in self.proc.stdout:
                         handle.write(line)
                         handle.flush()
-                        if line.startswith("[PIKA_PROGRESS] "):
-                            try:
-                                progress = json.loads(line[len("[PIKA_PROGRESS] "):])
-                                with self.lock:
-                                    if job["status"] == "running":
-                                        job["progress"] = progress
-                                        job["stage"] = progress["message"]
-                                        self.save(job)
-                                continue
-                            except (ValueError, KeyError):
-                                pass
+                        progress = parse_progress_line(line)
+                        if progress is not None:
+                            with self.lock:
+                                if job["status"] == "running":
+                                    job["progress"] = progress
+                                    job["stage"] = progress["message"]
+                                    self.save(job)
+                            continue
                         lower = line.lower()
                         stage = None
                         if "[cond]" in lower:
@@ -278,7 +292,8 @@ class Studio:
                             else:
                                 stage = "加载模型分片"
                         elif "%|" in lower or "it/s" in lower or "s/it" in lower:
-                            stage = "官方程序运行中（详见日志）"
+                            if job.get("progress", {}).get("phase") != "sampling":
+                                stage = "官方程序运行中（详见日志）"
                         elif "decod" in lower:
                             stage = "解码音画"
                         if stage:
