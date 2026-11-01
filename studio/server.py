@@ -116,6 +116,9 @@ class Studio:
         if source_video:
             self.upload_path(source_video, "video")
         second_pass = bool(data.get("second_pass", False)) or bool(source_video)
+        refiner_backend = data.get("refiner_backend", os.getenv("PIKA_REFINER_BACKEND", "openh3"))
+        if refiner_backend not in {"openh3", "pika"}:
+            raise ValueError("二采后端请选择 openh3 或 pika")
         raw_sigma = data.get("start_sigma", 0.78)
         if type(raw_sigma) is bool or not isinstance(raw_sigma, (int, float)) or not 0.1 <= float(raw_sigma) <= 0.99:
             raise ValueError("二采重噪强度 start_sigma 需在 0.1–0.99 之间")
@@ -127,7 +130,8 @@ class Studio:
         return dict(prompt=prompt.strip(), task=task, resolution=res, duration=duration,
                     aspect=aspect, seed=seed, cpu_offload=offload, first_image=first,
                     last_image=last, references=cleaned, source_video=source_video,
-                    second_pass=second_pass, start_sigma=start_sigma, upscale_factor=upscale_factor)
+                    second_pass=second_pass, refiner_backend=refiner_backend,
+                    start_sigma=start_sigma, upscale_factor=upscale_factor)
 
     def submit(self, data):
         if self.preview or not self.cli.is_file():
@@ -176,7 +180,8 @@ class Studio:
             cmd.extend(["--source-video", str(self.upload_path(p["source_video"], "video"))])
         if p.get("second_pass") or p.get("source_video"):
             cmd.extend(["--second-pass", "--start-sigma", str(p.get("start_sigma", 0.78)),
-                        "--upscale-factor", str(p.get("upscale_factor", 2.0))])
+                        "--upscale-factor", str(p.get("upscale_factor", 2.0)),
+                        "--refiner-backend", p.get("refiner_backend", "pika")])
         return cmd
 
     def cancel(self, job_id):

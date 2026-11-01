@@ -20,6 +20,7 @@ APP_VERSION = "1.3.0"
 PORT = 8188  # 复用原来 ComfyUI 的隧道服务端口。
 STORAGE_ROOT = ""  # 空白自动检测 scratch；也可填 /mnt/local-scratch。
 HTTP_DOWNLOAD = False  # Xet 下载异常时设 True，后续生成进程走普通 HTTP。
+PREPARE_OPENH3 = True  # 启动时准备独立 INT8 二采，避免首次任务等待下载而超时。
 BUNDLE_GZ_B64 = "__BUNDLE_PLACEHOLDER__"
 
 
@@ -129,6 +130,10 @@ def main():
         target = app_dir / name
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(content, encoding="utf-8")
+    if PREPARE_OPENH3:
+        print("准备 OpenH3 INT8 二采（独立环境，无 HTTP 服务；首次需下载额外模型）...", flush=True)
+        subprocess.run([str(cli.parent / "python"), str(app_dir / "openh3_setup.py"),
+                        "--root", str(work / "openh3")], check=True, env=env)
     env.pop("PIKA_STUDIO_PASSWORD", None)
     env.pop("CF_TUNNEL_TOKEN", None)
     log = work / "logs" / "studio-server.log"

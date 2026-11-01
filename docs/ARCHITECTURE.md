@@ -145,6 +145,8 @@ shot_id  role('first'|'last'|'reference'|'editor_*')  position  kind  upload_id
 
 ## 6. 模型构成
 
+以下为官方 Pika 一采组件。新增独立 OpenH3 INT8 二采的模型、进程隔离与验证范围见 [OPENH3_CLI.md](OPENH3_CLI.md)。
+
 `colab_one.py` 默认准备 REF2VA 与 FL2VA 两套权重，合计约 **216 GB**，编码器和 VAE 共用一份。普通版单套约 **146.8 GB**，组成如下：
 
 | 组件 | 文件数 | 大小 | 来源 |
@@ -176,6 +178,8 @@ shot_id  role('first'|'last'|'reference'|'editor_*')  position  kind  upload_id
 ---
 
 ## 7. 性能实测（A100 80GB）
+
+以下为历史 Pika 一采数据，不代表新增 OpenH3 二采的速度。
 
 ### 480p / 5 秒
 

@@ -809,6 +809,20 @@ def run_fused_pass1_and_pass2(args, start_sigma=0.78, upscale_factor=2.0):
 
 def main():
     emit("starting", "初始化官方推理程序")
+    # Route before importing torch/Pika: the OpenH3 process owns a separate env.
+    import argparse
+    import os
+    router = argparse.ArgumentParser(add_help=False)
+    router.add_argument("--refiner-backend", choices=("openh3", "pika"),
+                        default=os.getenv("PIKA_REFINER_BACKEND", "openh3"))
+    route, remaining = router.parse_known_args(sys.argv[1:])
+    sys.argv = [sys.argv[0]] + remaining
+    clean, refine, source, sigma, scale = extract_pass2_args(remaining)
+    if refine and route.refiner_backend == "openh3":
+        from openh3_cli import run_job
+        run_job(clean, source, sigma, scale)
+        emit("done", "OpenH3 INT8 精修保存完成")
+        return
     import torch
     import pika_h3  # noqa: F401  先加载包，才能定位子模块
     skipped = load_pipeline_without_output_verify()

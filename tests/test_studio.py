@@ -220,8 +220,10 @@ class BundleTests(unittest.TestCase):
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
         files = json.loads(gzip.decompress(base64.b64decode(module.BUNDLE_GZ_B64)))
-        # Colab 只带后端三个文件：不再有 jobstore 和 public 前端。
-        self.assertEqual(set(files), {"installer_runtime.py", "server.py", "progress_runner.py"})
+        self.assertEqual(set(files), {"installer_runtime.py", "server.py", "progress_runner.py",
+                                      "openh3_cli.py", "openh3_setup.py"})
+        for name in ("progress_runner.py", "openh3_cli.py", "openh3_setup.py"):
+            self.assertEqual(files[name], (ROOT / "studio" / name).read_text(encoding="utf-8"))
         # 构建时会把 APP_VERSION 换成 git 版本号，比较前先抹掉。
         strip = lambda text: __import__("re").sub(r'APP_VERSION = "[^"]+"', 'APP_VERSION = "X"', text)
         self.assertEqual(strip(files["server.py"]),

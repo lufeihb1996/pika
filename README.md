@@ -2,7 +2,7 @@
 
 在 Colab 上用 A100 跑官方 **Pika H3 Flex** 的本地工作台：网页选参数、串行排队、自动把成片下载到电脑。
 
-不写 ComfyUI 工作流，直接驱动官方 CLI `pika-h3-pro`，用它的固定权重版本、适配器校验和六步采样。
+不写 ComfyUI 工作流，直接驱动官方 CLI `pika-h3-pro`，用它的固定权重版本、适配器校验和六步采样。二采默认使用独立 OpenH3 INT8 CLI，详见 [精修说明](docs/OPENH3_CLI.md)。
 
 ---
 
@@ -69,7 +69,7 @@ exec(urllib.request.urlopen(
 | 时长 | 5–15 秒（24fps，17n+5 帧网格） |
 | 音频 | 32 kHz 立体声，混在 MP4 里 |
 | 并行 | 单卡串行，一条一个 CLI 子进程 |
-| 本地没有 | 1080p / 2K / 4K、音频分轨、提示词增强（那是 Pika 托管 API） |
+| 本地扩展 | OpenH3 INT8 CLI 二采支持 720p / 1080p / 1.5K / 2K 像素预算；不等同于 Pika 托管 API |
 
 ---
 
@@ -81,7 +81,8 @@ exec(urllib.request.urlopen(
 | `local_media.py` | 后台轮询、提交、下载；持有本地 SQLite |
 | `jobstore.py` | 本地表结构：shots / takes / shot_assets |
 | `studio/server.py` | Colab 端无状态服务 |
-| `studio/progress_runner.py` | 包装官方 CLI：报进度、跳过回读校验 |
+| `studio/progress_runner.py` | 官方一采与二采后端路由、进度 |
+| `studio/openh3_cli.py` · `openh3_setup.py` | 独立 INT8 精修 CLI、环境与模型准备 |
 | `installer_runtime.py` | 选盘、建 venv、装依赖、GPU 预检 |
 | `vercel-web/` | 可单独部署的静态前端 |
 | `dist/` | 打包好的 Colab 启动器（单文件） |
