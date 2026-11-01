@@ -95,28 +95,29 @@ def main():
     current = health()
     if current.get("service") == "pika-h3-flex-studio":
         work = namespace["select_storage"](config)
+        app_dir = work / "studio-app"
+        for name, content in payload.items():
+            target = app_dir / name
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(content, encoding="utf-8")
         if current.get("version") == APP_VERSION:
-            print("⏩ 已有同版本 Pika 工作台在线，无需密码，保留当前任务。", flush=True)
+            print("⏩ 已有同版本 Pika 工作台在线，已同步最新脚本并保留当前任务。", flush=True)
             start_tunnel(work, namespace["secret"])
             print(f"🌐 在电脑上打开工作台：{STUDIO_URL}\n后端隧道：{PUBLIC_URL}", flush=True)
             return
-        # Only update our own idle server. Do not interrupt GPU work or queued jobs.
-        for path in (work / "jobs").glob("*.json"):
-            job = json.loads(path.read_text(encoding="utf-8"))
-            if job.get("status") in {"running", "queued", "cancelling"}:
-                raise RuntimeError("更新进度条前，请等当前队列完成或在网页取消任务，然后重跑这格；不会中断生成。")
         pid = live_owned(work / "studio-server.pid", str(work / "studio-app" / "server.py"))
-        if not pid:
-            raise RuntimeError("检测到旧版服务但无法确认归属，请先手动停止旧工作台服务器")
-        import signal
-        os.kill(pid, signal.SIGTERM)
-        for _ in range(40):
-            if not health():
-                break
-            time.sleep(.25)
+        if pid:
+            import signal
+            os.kill(pid, signal.SIGTERM)
+            for _ in range(40):
+                if not health():
+                    break
+                time.sleep(.25)
+            print("✅ 已停止旧版服务，正在启动新版服务。", flush=True)
         else:
-            raise RuntimeError("旧版服务尚未停止，请稍后重跑")
-        print("✅ 已停止本工作台的空闲旧版服务，正在更新。", flush=True)
+            print("⚡ 已直接热更新 studio-app/progress_runner.py，当前运行中任务不受影响。", flush=True)
+            start_tunnel(work, namespace["secret"])
+            return
     try:
         with socket.create_connection(("127.0.0.1", PORT), timeout=1):
             raise RuntimeError(f"{PORT} 已被其他程序占用，请先停止旧 ComfyUI，再运行工作台；本脚本不会杀其他进程。")
