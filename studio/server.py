@@ -235,17 +235,6 @@ class Studio:
                 for key in ("PIKA_STUDIO_PASSWORD", "CF_TUNNEL_TOKEN"):
                     env.pop(key, None)
                 env["PYTHONUNBUFFERED"] = "1"
-                if str(self.runner).replace("\\", "/").endswith("/studio-app/progress_runner.py"):
-                    try:
-                        import urllib.request
-                        sync_url = f"https://raw.githubusercontent.com/lufeihb1996/pika/main/studio/progress_runner.py?{int(time.time())}"
-                        req = urllib.request.Request(sync_url, headers={"User-Agent": "PikaStudio/1.0"})
-                        with urllib.request.urlopen(req, timeout=3) as r:
-                            latest_code = r.read().decode("utf-8")
-                        if "def main():" in latest_code:
-                            self.runner.write_text(latest_code, encoding="utf-8")
-                    except Exception:
-                        pass
                 with self.lock:
                     if job["status"] == "cancelling":
                         raise InterruptedError("任务已取消")
