@@ -51,18 +51,16 @@ class OpenH3Tests(unittest.TestCase):
             calls = []
             def run(cmd, **kwargs):
                 calls.append((cmd, kwargs))
-                if len(calls) == 1:
-                    self.assertIn("progress_runner.py", cmd[1])
-                    self.assertNotIn("--second-pass", cmd)
-                    Path(cmd[cmd.index("--output") + 1]).write_bytes(b"draft")
-                else:
-                    self.assertEqual(cmd[0], "refiner-python")
-                    self.assertEqual(cmd[cmd.index("--resolution") + 1], "1080p")
-                    raise RuntimeError("simulated refiner failure")
-            with patch("openh3_setup.prepare", return_value=("refiner-python", Path(directory))), patch.object(openh3_cli.subprocess, "run", side_effect=run):
+                self.assertIn("progress_runner.py", cmd[1])
+                self.assertNotIn("--second-pass", cmd)
+                Path(cmd[cmd.index("--output") + 1]).write_bytes(b"draft")
+            with patch("openh3_setup.prepare", return_value=("refiner-python", Path(directory))), patch("openh3_worker.stop_resident") as stop, patch("openh3_worker.run_resident", side_effect=RuntimeError("simulated refiner failure")) as resident, patch.object(openh3_cli.subprocess, "run", side_effect=run):
                 with self.assertRaisesRegex(RuntimeError, "simulated"):
                     openh3_cli.run_job(["--output", str(output), "--prompt", "test"], "", .78, 2)
-            self.assertEqual(len(calls), 2)
+            self.assertEqual(len(calls), 1)
+            stop.assert_called_once()
+            self.assertEqual(resident.call_args.args[0], "refiner-python")
+            self.assertEqual(resident.call_args.args[-1]["resolution"], "1080p")
             self.assertEqual(output.read_bytes(), b"previous successful artifact")
             self.assertEqual(calls[0][1]["env"]["PIKA_REFINER_BACKEND"], "pika")
 
@@ -70,10 +68,10 @@ class OpenH3Tests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             source = Path(directory) / "draft.mp4"
             source.touch()
-            with patch("openh3_setup.prepare", return_value=("refiner-python", Path(directory))), patch.object(openh3_cli.subprocess, "run") as run:
+            with patch("openh3_setup.prepare", return_value=("refiner-python", Path(directory))), patch("openh3_worker.run_resident") as resident, patch.object(openh3_cli.subprocess, "run") as run:
                 openh3_cli.run_job(["--output", str(Path(directory) / "new.mp4")], str(source), .78, 2.5)
-            self.assertEqual(run.call_count, 1)
-            self.assertIn("2k", run.call_args.args[0])
+            run.assert_not_called()
+            self.assertEqual(resident.call_args.args[-1]["resolution"], "2k")
 
     def test_missing_source_fails_before_setup(self):
         with patch("openh3_setup.prepare") as setup:

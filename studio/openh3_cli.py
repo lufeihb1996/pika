@@ -1,7 +1,9 @@
 """Headless INT8 OpenH3 runner; imports model libraries but starts no HTTP server."""
 import argparse
+from collections import OrderedDict
 from contextlib import contextmanager
 import gc
+import hashlib
 import json
 import math
 import os
@@ -9,6 +11,51 @@ from pathlib import Path
 import subprocess
 import sys
 import time
+
+_ENGINE = None
+_MODELS = OrderedDict()
+_CONDITIONS = OrderedDict()
+_DRAFTS = OrderedDict()
+
+
+def cached(cache, key, factory, label, limit):
+    hit = key in cache
+    if not hit:
+        cache[key] = factory()
+    cache.move_to_end(key)
+    while len(cache) > limit:
+        cache.popitem(last=False)
+    emit("loading", ("复用缓存 · " if hit else "首次加载 · ") + label,
+         cache_hit=hit, worker_pid=os.getpid())
+    return cache[key]
+
+
+def to_cpu(value, torch):
+    if isinstance(value, torch.Tensor):
+        return value.detach().cpu()
+    if isinstance(value, dict):
+        return {key: to_cpu(item, torch) for key, item in value.items()}
+    if isinstance(value, list):
+        return [to_cpu(item, torch) for item in value]
+    if isinstance(value, tuple):
+        return tuple(to_cpu(item, torch) for item in value)
+    return value
+
+
+def content_hash(path):
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        while block := stream.read(1024**2):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def main_model(nodes, regen):
+    def load():
+        base = nodes.UNETLoader().load_unet("minimax_h3_fl2va_pruned_int8_convrot.safetensors", "default")[0]
+        return regen.OpenH3RegenLora().apply(base, "open_h3_regenerate_2k_lora.safetensors",
+            "sharp_curve_branches.safetensors", "ref2va_adaln_t_table.safetensors", 1.0, 0.65, "bf16")[0]
+    return cached(_MODELS, "main", load, "FL2VA + Regenerate + Sharp", 6)
 
 
 def emit(phase, message, **data):
@@ -48,7 +95,8 @@ def run_job(clean, source, sigma, scale):
         raise FileNotFoundError(source)
     if source and Path(source).resolve() == output:
         raise ValueError("Refinement output must differ from the source video")
-    root = Path(os.getenv("PIKA_OPENH3_HOME", str(output.parent.parent / "openh3"))).resolve()
+    from openh3_worker import worker_root, run_resident, stop_resident
+    root = worker_root(output)
     from openh3_setup import prepare
     with stage("assets", "准备独立 OpenH3 INT8 精修环境与模型"):
         python, comfy = prepare(root)
@@ -57,6 +105,7 @@ def run_job(clean, source, sigma, scale):
         if not source.is_file():
             raise FileNotFoundError(source)
     else:
+        stop_resident(root)
         source = output.with_name(output.stem + ".pass1.mp4")
         argv = list(clean)
         argv[argv.index("--output") + 1] = str(source)
@@ -67,16 +116,18 @@ def run_job(clean, source, sigma, scale):
     output.parent.mkdir(parents=True, exist_ok=True)
     prompt_path = output.with_suffix(".refine.txt")
     prompt_path.write_text(prompt, encoding="utf-8")
-    subprocess.run([str(python), str(Path(__file__).resolve()), "--engine", str(comfy), "--source", str(source),
-                    "--output", str(output), "--prompt-file", str(prompt_path), "--seed", str(args.seed),
-                    "--resolution", resolution_for_scale(scale), "--start-sigma", str(sigma)], check=True)
+    run_resident(python, comfy, root, dict(source=str(source), output=str(output),
+        prompt_file=str(prompt_path), seed=args.seed, resolution=resolution_for_scale(scale), start_sigma=sigma))
 
 
 def refine(args):
+    global _ENGINE
     args.engine = args.engine.resolve()
     args.source = args.source.resolve()
     args.output = args.output.resolve()
     args.prompt_file = args.prompt_file.resolve()
+    if _ENGINE is not None and _ENGINE != args.engine:
+        raise RuntimeError("Resident refiner cannot change its engine directory")
     if args.source == args.output:
         raise ValueError("Refinement output must differ from the source video")
     if not 0.1 <= args.start_sigma <= 0.99:
@@ -108,7 +159,8 @@ def refine(args):
         for name in ("Comfyui_Minimax_h3_latent_Upscaler", "ComfyUI-Open-H3-Regenerate"):
             if not await nodes.load_custom_node(str(args.engine / "custom_nodes" / name)):
                 raise RuntimeError(f"Failed to load headless refiner library: {name}")
-    asyncio.run(load_plugins())
+    if _ENGINE is None:
+        asyncio.run(load_plugins())
     regen = sys.modules[nodes.NODE_CLASS_MAPPINGS["OpenH3RegenLora"].__module__]
     # Upstream table inversion accepts rows; spatial conditioning can have leading axes.
     original_invert = regen.core.invert_table
@@ -121,55 +173,62 @@ def refine(args):
             parts.append(values)
             error = max(error, distance)
         return torch.cat(parts)[inverse].reshape(shape), error
-    regen.core.invert_table = invert
+    if _ENGINE is None:
+        regen.core.invert_table = invert
+        _ENGINE = args.engine
 
     def result(value):
         return value.result if hasattr(value, "result") else value
 
+    if getattr(args, "warm_only", False):
+        with stage("loading", "预加载常驻精修主模型，不生成视频"):
+            model = main_model(nodes, regen)
+            mm.load_models_gpu([model])
+        emit("loading", "常驻主模型已就绪", worker_pid=os.getpid())
+        return
+
     with torch.inference_mode():
         with stage("conditioning", "读取原片并准备 24fps 精修输入"):
-            with av.open(str(args.source)) as container:
-                stream = container.streams.video[0]
-                rate = float(stream.average_rate or stream.guessed_rate or 24)
-                if stream.duration and float(stream.duration * stream.time_base) > 15.3:
+            def encode_draft():
+                with av.open(str(args.source)) as container:
+                    stream = container.streams.video[0]
+                    rate = float(stream.average_rate or stream.guessed_rate or 24)
+                    if stream.duration and float(stream.duration * stream.time_base) > 15.3:
+                        raise ValueError("OpenH3 单次精修支持约 15 秒；请先拆分长视频")
+                    images = torch.from_numpy(np.stack([frame.to_ndarray(format="rgb24") for frame in container.decode(video=0)])).float() / 255
+                images, count, width, height = regen.OpenH3RegenPrepareDraft().prepare(images, "keep (snap to 32)", 0, rate)
+                if count > 365:
                     raise ValueError("OpenH3 单次精修支持约 15 秒；请先拆分长视频")
-                images = torch.from_numpy(np.stack([frame.to_ndarray(format="rgb24") for frame in container.decode(video=0)])).float() / 255
-            # Keep source composition; the old fixed 16:9 draft preset would crop other aspects.
-            images, count, width, height = regen.OpenH3RegenPrepareDraft().prepare(images, "keep (snap to 32)", 0, rate)
-            if count > 365:
-                raise ValueError("OpenH3 单次精修支持约 15 秒；请先拆分长视频")
+                vae = cached(_MODELS, "video_vae", lambda: nodes.VAELoader().load_vae("minimax_h3_video_vae_fp16.safetensors")[0], "视频 VAE", 6)
+                latent = nodes.VAEEncode().encode(vae, images)[0]
+                return to_cpu(latent, torch), count, width, height
+            draft, count, width, height = cached(_DRAFTS, content_hash(args.source), encode_draft, "一采视频编码", 2)
+            # Keep each job's latent dictionary and tensor separate from the cache.
+            latent = dict(draft, samples=draft["samples"].clone())
             width_out, height_out = target_size(width, height, args.resolution)
             compute_width = math.ceil(width_out / 32) * 32
             compute_height = math.ceil(height_out / 32) * 32
             emit("conditioning", f"OpenH3 输入 {width}×{height} → 输出 {width_out}×{height_out}，{count}帧",
                  input_width=width, input_height=height, output_width=width_out, output_height=height_out, frames=count)
-            vae = nodes.VAELoader().load_vae("minimax_h3_video_vae_fp16.safetensors")[0]
-            latent = nodes.VAEEncode().encode(vae, images)[0]
-            del images, vae
-            mm.unload_all_models()
             gc.collect()
-            mm.soft_empty_cache()
         with stage("conditioning", "INT8 Qwen 编码精修提示词"):
-            clip = nodes.CLIPLoader().load_clip("qwen3vl_32b_minimax_h3_int8_convrot.safetensors", "minimax")[0]
-            cond = nodes.CLIPTextEncode().encode(clip, args.prompt_file.read_text(encoding="utf-8"))[0]
-            del clip
-            mm.unload_all_models()
+            prompt = args.prompt_file.read_text(encoding="utf-8")
+            def encode_condition():
+                clip = cached(_MODELS, "clip", lambda: nodes.CLIPLoader().load_clip("qwen3vl_32b_minimax_h3_int8_convrot.safetensors", "minimax")[0], "Qwen 文本编码器", 6)
+                return to_cpu(nodes.CLIPTextEncode().encode(clip, prompt)[0], torch)
+            cond = cached(_CONDITIONS, prompt, encode_condition, "提示词编码", 16)
             gc.collect()
-            mm.soft_empty_cache()
         with stage("upscaling", "OpenH3 3D 潜变量放大"):
             cls = nodes.NODE_CLASS_MAPPINGS["MinimaxH3LatentUpscaler3D"]
             mode = sys.modules[cls.__module__].UpscaleMode.TARGET_DIMENSIONS
             latent = result(cls.execute(latent, "minimax_h3_latent_upscaler_3d_conv_v1_bf16.safetensors",
                                        {"mode": mode, "width": compute_width, "height": compute_height}, align=32,
-                                       enable_temporal_chunking=True, force_unload=True, device="cuda", precision="bf16"))[0]
-            audio_vae = nodes.VAELoader().load_vae("minimax_h3_audio_vae_fp32.safetensors")[0]
+                                       enable_temporal_chunking=True, force_unload=False, device="cuda", precision="bf16"))[0]
+            audio_vae = cached(_MODELS, "audio_vae", lambda: nodes.VAELoader().load_vae("minimax_h3_audio_vae_fp32.safetensors")[0], "音频 VAE", 6)
             latent = regen.OpenH3RegenRefineLatent().build(latent, regen.AUDIO_MODES[0], audio_vae=audio_vae)[0]
             del audio_vae
-            mm.unload_all_models()
         with stage("loading", "加载独立 FL2VA INT8 + OpenH3 Regenerate + Sharp"):
-            model = nodes.UNETLoader().load_unet("minimax_h3_fl2va_pruned_int8_convrot.safetensors", "default")[0]
-            model = regen.OpenH3RegenLora().apply(model, "open_h3_regenerate_2k_lora.safetensors",
-                        "sharp_curve_branches.safetensors", "ref2va_adaln_t_table.safetensors", 1.0, 0.65, "bf16")[0]
+            model = main_model(nodes, regen)
             sigmas = regen.OpenH3RegenSigmas().sigmas(3, args.start_sigma)[0]
             guider = result(samplers.BasicGuider.execute(model, cond))[0]
             noise = result(samplers.RandomNoise.execute(args.seed))[0]
@@ -182,9 +241,7 @@ def refine(args):
         emit("sampling", "OpenH3 INT8 · Euler 三步精修", completed=0, total=3)
         refined = result(samplers.SamplerCustomAdvanced.execute(noise, guider, comfy.samplers.sampler_object("euler"), sigmas, latent))[0]
         del guider, model, noise, latent, cond
-        mm.unload_all_models()
         gc.collect()
-        mm.soft_empty_cache()
         with stage("decoding", "OpenH3 Fast VAE 解码"):
             pixels = regen.OpenH3RegenFastVAEDecode().decode(refined, "fast_h3_vae_noncausal_24l.safetensors", False)[0][:count]
             y, x = (pixels.shape[1] - height_out) // 2, (pixels.shape[2] - width_out) // 2
@@ -211,7 +268,8 @@ def refine(args):
                     process.wait()
                 temporary.unlink(missing_ok=True)
         args.output.with_suffix(".json").write_text(json.dumps(dict(backend="openh3_int8", width=width_out, height=height_out,
-              frames=count, steps=3, start_sigma=args.start_sigma, seed=args.seed), indent=2), encoding="utf-8")
+              frames=count, steps=3, start_sigma=args.start_sigma, seed=args.seed,
+              worker_pid=os.getpid()), indent=2), encoding="utf-8")
         emit("done", "OpenH3 INT8 精修完成")
 
 

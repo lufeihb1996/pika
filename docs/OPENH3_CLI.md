@@ -2,7 +2,7 @@
 
 新提交的二采任务默认 `refiner_backend=openh3`。普通一采保持官方 Pika CLI。
 `progress_runner.py` 在导入 Pika / torch 之前路由：已有视频直接精修；一二采连跑先由独立
-Pika 子进程保存 `.pass1.mp4` 并退出，再由另一个 Python 环境启动 OpenH3。无需 ComfyUI
+Pika 子进程保存 `.pass1.mp4` 并退出，再由独立环境的常驻进程执行 OpenH3。无需 ComfyUI
 HTTP 服务、网页或第二个隧道，但精修依赖固定版本的 ComfyUI Python 模型加载和采样库。
 
 ## 启动
@@ -59,13 +59,29 @@ Pika 的 BF16 权重不替代上述 INT8 模型。下载缓存与精修环境均
 是草稿视频，提示词来自当前任务，因此需要验证身份保持效果。
 
 Fast VAE 解码后由 FFmpeg 复制原音轨，画面编码到临时文件；FFmpeg 成功后原子替换目标。
-精修失败保留一采原片和已有输出。各阶段报告耗时，输出旁的 JSON 保存实际宽高和参数。
-POSIX 子进程继承队列任务的进程组，沿用已有整组终止逻辑。
+精修失败保留一采原片和已有输出。各阶段报告耗时，输出旁的 JSON 保存实际宽高、参数及 worker PID。
+
+## 连续二采的常驻与缓存
+
+`openh3_worker.py` 通过私有 Unix socket（0600 权限）串行服务现有 CLI 任务，不开放新的 HTTP 端口。
+相邻二采任务复用一个进程。FL2VA 主模型、Regenerate / Sharp 补丁、Qwen、视频与音频 VAE 只首次
+从磁盘加载；Fast VAE 和放大器沿用插件内存缓存。进程保留模型对象，GPU 由显存管理器按余量安排，
+取消了各阶段无条件卸载全部模型的调用；不强制整套模型永远驻留 GPU。
+
+最近两份原片的编码潜变量按文件内容 SHA256 缓存，最近 16 份提示词条件按原文缓存；每个任务
+克隆自己的输入潜变量，重新创建种子、噪声、sigma 和 guider。输出尺寸、步数、LoRA 强度保持不变。
+首次仍是冷加载；后续日志报告 `cache_hit` 和 `worker_pid`，可据此核验真实复用。
+
+切回 Pika 一采或旧 Pika 二采时，CLI 先退出空闲常驻进程并等待显存释放。队列仍按原逻辑终止
+每个任务的 CLI 进程组；常驻进程监测代理 socket，代理退出就终止自己的进程组（含 FFmpeg），
+释放 GPU。异常任务也退出常驻进程，下一任务重新加载；不复用失败后的 CUDA 上下文。
+源码变更、环境升级会更换空闲 worker。没有新增暂停、恢复、重置或中断 API。
 
 ## 验证范围
 
 `python -m unittest discover -s tests -v` 验证路由、队列参数冻结、独立子进程、
-已有视频跳过一采、失败保留产物、尺寸计算与 Colab 打包。没有提交真实 GPU 生成。
+已有视频跳过一采、失败保留产物、尺寸计算与 Colab 打包。Linux socket 专项在 Colab 上以模拟
+推理验证同进程 / 同对象复用、任务失败、代理断开取消；没有为此提交真实 GPU 视频生成。
 Colab 上仍需验证模型加载、显存峰值、精修速度和画质；不能把隔离测试当成速度或画质实测。
 
 来源：[OpenH3 节点实现](https://github.com/rdh9616/ComfyUI-Open-H3-Regenerate)、

@@ -824,6 +824,13 @@ def main():
         run_job(clean, source, sigma, scale)
         emit("done", "OpenH3 INT8 精修保存完成")
         return
+    # A Pika BF16 job must not compete with the resident INT8 refiner for VRAM.
+    output_parser = argparse.ArgumentParser(add_help=False, allow_abbrev=False)
+    output_parser.add_argument("--output", type=Path)
+    output_args, _ = output_parser.parse_known_args(clean)
+    if output_args.output:
+        from openh3_worker import worker_root, stop_resident
+        stop_resident(worker_root(output_args.output))
     import torch
     import pika_h3  # noqa: F401  先加载包，才能定位子模块
     skipped = load_pipeline_without_output_verify()

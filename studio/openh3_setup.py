@@ -150,6 +150,8 @@ def _prepare_locked(root):
     marker = root / "ready.json"
     fingerprint = hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
     if not marker.is_file() or json.loads(marker.read_text()).get("fingerprint") != fingerprint:
+        from openh3_worker import stop_resident
+        stop_resident(root)
         checkout("https://github.com/Comfy-Org/ComfyUI.git", comfy, COMFY_REV)
         checkout("https://github.com/rdh9616/ComfyUI-Open-H3-Regenerate.git", comfy / "custom_nodes/ComfyUI-Open-H3-Regenerate", REGEN_REV)
         checkout("https://github.com/LBH-123-AI/Comfyui_Minimax_h3_latent_Upscaler.git", comfy / "custom_nodes/Comfyui_Minimax_h3_latent_Upscaler", UPSCALE_REV)

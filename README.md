@@ -82,7 +82,7 @@ exec(urllib.request.urlopen(
 | `jobstore.py` | 本地表结构：shots / takes / shot_assets |
 | `studio/server.py` | Colab 端无状态服务 |
 | `studio/progress_runner.py` | 官方一采与二采后端路由、进度 |
-| `studio/openh3_cli.py` · `openh3_setup.py` | 独立 INT8 精修 CLI、环境与模型准备 |
+| `studio/openh3_cli.py` · `openh3_worker.py` · `openh3_setup.py` | INT8 精修 CLI、常驻模型缓存、环境与模型准备 |
 | `installer_runtime.py` | 选盘、建 venv、装依赖、GPU 预检 |
 | `vercel-web/` | 可单独部署的静态前端 |
 | `dist/` | 打包好的 Colab 启动器（单文件） |
