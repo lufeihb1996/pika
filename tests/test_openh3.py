@@ -34,6 +34,16 @@ class OpenH3Tests(unittest.TestCase):
         self.assertEqual(clean, ["--output", "new.mp4"])
         self.assertEqual((sigma, scale), (.78, 2.0))
 
+    def test_reference_flags_are_not_consumed_as_backend_abbreviations(self):
+        refs = ["--ref", "image:/uploads/person.png", "--ref", "video:/uploads/scene.mp4"]
+        for backend_args in ([], ["--refiner-backend", "openh3"]):
+            with self.subTest(backend_args=backend_args):
+                argv = ["runner", "--task", "ref2va", *refs, *backend_args,
+                        "--second-pass", "--source-video", "draft.mp4", "--output", "new.mp4"]
+                with patch.object(sys, "argv", argv), patch.dict(os.environ, {"PIKA_REFINER_BACKEND": "openh3"}), patch.object(openh3_cli, "run_job") as job:
+                    progress_runner.main()
+                self.assertEqual(job.call_args.args[0], ["--task", "ref2va", *refs, "--output", "new.mp4"])
+
     def test_fused_stages_use_separate_processes_and_keep_old_output(self):
         with tempfile.TemporaryDirectory() as directory:
             output = Path(directory) / "old.mp4"

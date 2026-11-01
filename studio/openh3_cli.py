@@ -37,7 +37,7 @@ def resolution_for_scale(scale):
 
 
 def run_job(clean, source, sigma, scale):
-    parser = argparse.ArgumentParser(add_help=False)
+    parser = argparse.ArgumentParser(add_help=False, allow_abbrev=False)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--prompt-file", type=Path)
     parser.add_argument("--prompt", default="")

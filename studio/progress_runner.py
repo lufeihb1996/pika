@@ -812,7 +812,8 @@ def main():
     # Route before importing torch/Pika: the OpenH3 process owns a separate env.
     import argparse
     import os
-    router = argparse.ArgumentParser(add_help=False)
+    # Official --ref must pass through, never abbreviate --refiner-backend.
+    router = argparse.ArgumentParser(add_help=False, allow_abbrev=False)
     router.add_argument("--refiner-backend", choices=("openh3", "pika"),
                         default=os.getenv("PIKA_REFINER_BACKEND", "openh3"))
     route, remaining = router.parse_known_args(sys.argv[1:])
