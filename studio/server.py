@@ -435,7 +435,7 @@ class Handler(BaseHTTPRequestHandler):
             req = urllib.request.Request(url, headers={"User-Agent": "PikaStudio/1.0"})
             with urllib.request.urlopen(req, timeout=15) as r:
                 code = r.read().decode("utf-8")
-            self.app.runner.write_text(code, encoding="utf-8")
+            Path(__file__).with_name("progress_runner.py").write_text(code, encoding="utf-8")
             return self.json({"ok": True, "bytes": len(code)})
         match = re.fullmatch(r"/media/([0-9a-f]{32})", path)
         if match and not post:
